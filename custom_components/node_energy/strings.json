@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Node Energy",
+        "description": "Configure one battery node + optional weather source.",
+        "data": {
+          "name": "Name",
+          "battery_entity": "Battery percent entity",
+          "voltage_entity": "Voltage entity (optional)",
+          "weather_entity": "Weather entity (optional)",
+          "start_hour": "Analysis start hour (0-23)",
+          "cells_current": "Current number of cells",
+          "cell_mah": "Cell capacity (mAh)",
+          "cell_v": "Nominal cell voltage",
+          "horizon_days": "Forecast horizon (days)"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Node Energy Options",
+        "data": {
+          "name": "Name",
+          "battery_entity": "Battery percent entity",
+          "voltage_entity": "Voltage entity (optional)",
+          "weather_entity": "Weather entity (optional)",
+          "start_hour": "Analysis start hour (0-23)",
+          "cells_current": "Current number of cells",
+          "cell_mah": "Cell capacity (mAh)",
+          "cell_v": "Nominal cell voltage",
+          "horizon_days": "Forecast horizon (days)"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,492 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+import math
+from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
+
+from .const import (
+    ATTR_FORECAST,
+    ATTR_HISTORY_SOC,
+    ATTR_HISTORY_VOLTAGE,
+    ATTR_HISTORY_WEATHER,
+    ATTR_INTERVALS,
+    ATTR_META,
+    ATTR_MODEL,
+    CONF_BATTERY_ENTITY,
+    CONF_CELL_MAH,
+    CONF_CELL_V,
+    CONF_CELLS_CURRENT,
+    CONF_HORIZON_DAYS,
+    CONF_NAME,
+    CONF_START_HOUR,
+    CONF_VOLTAGE_ENTITY,
+    CONF_WEATHER_ENTITY,
+    DEFAULT_CELL_MAH,
+    DEFAULT_CELL_V,
+    DEFAULT_CELLS_CURRENT,
+    DEFAULT_HORIZON_DAYS,
+    DEFAULT_START_HOUR,
+    DOMAIN,
+    UPDATE_INTERVAL_MINUTES,
+)
+
+
+@dataclass
+class Sample:
+    ts: datetime
+    value: float
+
+
+def _mean(xs: list[float]) -> float:
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _parse_float(v: Any) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# NOAA-style approximation; same model as the standalone script.
+def _solar_position_utc(ts_utc: datetime, lat_deg: float, lon_deg: float) -> tuple[float, float]:
+    ts_utc = ts_utc.astimezone(UTC)
+    y = ts_utc.year
+    m = ts_utc.month
+    d = ts_utc.day
+    hr = ts_utc.hour + ts_utc.minute / 60.0 + ts_utc.second / 3600.0
+
+    if m <= 2:
+        y -= 1
+        m += 12
+    a = math.floor(y / 100)
+    b = 2 - a + math.floor(a / 4)
+    jd = math.floor(365.25 * (y + 4716)) + math.floor(30.6001 * (m + 1)) + d + b - 1524.5 + hr / 24.0
+    t = (jd - 2451545.0) / 36525.0
+
+    l0 = (280.46646 + t * (36000.76983 + t * 0.0003032)) % 360.0
+    m_sun = 357.52911 + t * (35999.05029 - 0.0001537 * t)
+    m_rad = math.radians(m_sun % 360.0)
+    c = (
+        math.sin(m_rad) * (1.914602 - t * (0.004817 + 0.000014 * t))
+        + math.sin(2 * m_rad) * (0.019993 - 0.000101 * t)
+        + math.sin(3 * m_rad) * 0.000289
+    )
+    true_long = l0 + c
+    omega = 125.04 - 1934.136 * t
+    lam = true_long - 0.00569 - 0.00478 * math.sin(math.radians(omega))
+    eps0 = 23.0 + (26.0 + ((21.448 - t * (46.815 + t * (0.00059 - t * 0.001813))) / 60.0)) / 60.0
+    eps = eps0 + 0.00256 * math.cos(math.radians(omega))
+
+    lam_r = math.radians(lam)
+    eps_r = math.radians(eps)
+    decl = math.asin(math.sin(eps_r) * math.sin(lam_r))
+    ra = math.atan2(math.cos(eps_r) * math.sin(lam_r), math.cos(lam_r))
+
+    gmst = (
+        280.46061837
+        + 360.98564736629 * (jd - 2451545.0)
+        + 0.000387933 * t * t
+        - (t * t * t) / 38710000.0
+    ) % 360.0
+    lst = math.radians((gmst + lon_deg) % 360.0)
+    ha = (lst - ra + math.pi) % (2 * math.pi) - math.pi
+
+    lat_r = math.radians(lat_deg)
+    elev = math.asin(math.sin(lat_r) * math.sin(decl) + math.cos(lat_r) * math.cos(decl) * math.cos(ha))
+    az = math.atan2(
+        math.sin(ha),
+        math.cos(ha) * math.sin(lat_r) - math.tan(decl) * math.cos(lat_r),
+    )
+    return math.degrees(elev), (math.degrees(az) + 180.0) % 360.0
+
+
+def _condition_weight(condition: str) -> float:
+    c = (condition or "").lower()
+    table = {
+        "sunny": 1.00,
+        "clear-night": 0.95,
+        "partlycloudy": 0.82,
+        "cloudy": 0.62,
+        "fog": 0.58,
+        "rainy": 0.50,
+        "pouring": 0.42,
+        "snowy": 0.48,
+        "snowy-rainy": 0.44,
+        "hail": 0.35,
+        "lightning": 0.32,
+        "lightning-rainy": 0.28,
+        "windy": 0.78,
+        "windy-variant": 0.72,
+    }
+    return table.get(c, 0.70)
+
+
+def _weather_factor(condition: str, cloud_coverage: float | None, precip_probability: float | None) -> float:
+    if cloud_coverage is None:
+        cloud_factor = _condition_weight(condition)
+    else:
+        cloud_frac = max(0.0, min(1.0, cloud_coverage / 100.0))
+        cloud_factor = 1.0 - 0.75 * cloud_frac
+    if precip_probability is None:
+        precip_factor = 1.0
+    else:
+        precip_factor = 1.0 - 0.25 * max(0.0, min(100.0, precip_probability)) / 100.0
+    return max(0.05, min(1.0, cloud_factor * _condition_weight(condition) * precip_factor))
+
+
+def _weather_factor_at(points: list[dict[str, Any]], ts: datetime) -> tuple[float, str]:
+    if not points:
+        return 1.0, ""
+
+    def by_hour_fallback(target_ts: datetime) -> tuple[float, str]:
+        buckets: dict[int, list[dict[str, Any]]] = {}
+        for p in points:
+            h = p["ts"].astimezone(target_ts.tzinfo or UTC).hour
+            buckets.setdefault(h, []).append(p)
+        h = target_ts.astimezone(target_ts.tzinfo or UTC).hour
+        if h in buckets and buckets[h]:
+            vals = buckets[h]
+            return _mean([float(v["factor"]) for v in vals]), vals[-1].get("condition", "")
+        return _mean([float(p["factor"]) for p in points]), points[-1].get("condition", "")
+
+    if ts <= points[0]["ts"] or ts >= points[-1]["ts"]:
+        return by_hour_fallback(ts)
+
+    for i in range(1, len(points)):
+        a = points[i - 1]
+        b = points[i]
+        if a["ts"] <= ts <= b["ts"]:
+            span = (b["ts"] - a["ts"]).total_seconds()
+            if span <= 0:
+                return float(a["factor"]), a.get("condition", "")
+            k = (ts - a["ts"]).total_seconds() / span
+            fac = float(a["factor"]) + (float(b["factor"]) - float(a["factor"])) * k
+            return fac, (a.get("condition", "") if k < 0.5 else b.get("condition", ""))
+
+    return by_hour_fallback(ts)
+
+
+class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self.entry = entry
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}-{entry.entry_id}",
+            update_interval=timedelta(minutes=UPDATE_INTERVAL_MINUTES),
+        )
+
+    @property
+    def cfg(self) -> dict[str, Any]:
+        return {**self.entry.data, **self.entry.options}
+
+    async def _async_fetch_history(self, entity_id: str, start_utc: datetime) -> list[Sample]:
+        if not entity_id:
+            return []
+
+        def _query() -> list[Sample]:
+            # recorder helper API varies by HA versions; keep fallback-safe.
+            from homeassistant.components.recorder.history import get_significant_states
+
+            res = get_significant_states(
+                self.hass,
+                start_utc,
+                None,
+                [entity_id],
+                include_start_time_state=True,
+                significant_changes_only=False,
+                minimal_response=False,
+                no_attributes=False,
+            )
+            items = res.get(entity_id, []) if isinstance(res, dict) else []
+            out: list[Sample] = []
+            for st in items:
+                v = _parse_float(getattr(st, "state", None))
+                if v is None:
+                    continue
+                t = getattr(st, "last_updated", None) or getattr(st, "last_changed", None)
+                if t is None:
+                    continue
+                out.append(Sample(ts=t, value=v))
+            out.sort(key=lambda x: x.ts)
+            return out
+
+        try:
+            return await self.hass.async_add_executor_job(_query)
+        except Exception:
+            return []
+
+    async def _async_fetch_weather_history(self, entity_id: str, start_utc: datetime) -> list[dict[str, Any]]:
+        if not entity_id:
+            return []
+
+        def _query() -> list[dict[str, Any]]:
+            from homeassistant.components.recorder.history import get_significant_states
+
+            res = get_significant_states(
+                self.hass,
+                start_utc,
+                None,
+                [entity_id],
+                include_start_time_state=True,
+                significant_changes_only=False,
+                minimal_response=False,
+                no_attributes=False,
+            )
+            items = res.get(entity_id, []) if isinstance(res, dict) else []
+            out: list[dict[str, Any]] = []
+            for st in items:
+                t = getattr(st, "last_updated", None) or getattr(st, "last_changed", None)
+                if t is None:
+                    continue
+                attrs = getattr(st, "attributes", {}) or {}
+                cond = (getattr(st, "state", "") or "").lower()
+                cloud = _parse_float(attrs.get("cloud_coverage"))
+                prob = _parse_float(attrs.get("precipitation_probability"))
+                out.append(
+                    {
+                        "ts": t,
+                        "condition": cond,
+                        "cloud_coverage": cloud,
+                        "precipitation_probability": prob,
+                        "factor": _weather_factor(cond, cloud, prob),
+                    }
+                )
+            out.sort(key=lambda x: x["ts"])
+            return out
+
+        try:
+            return await self.hass.async_add_executor_job(_query)
+        except Exception:
+            return []
+
+    async def _async_weather_forecast_hourly(self, weather_entity: str) -> list[dict[str, Any]]:
+        if not weather_entity:
+            return []
+        try:
+            resp = await self.hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"type": "hourly", "entity_id": weather_entity},
+                blocking=True,
+                return_response=True,
+            )
+        except Exception:
+            return []
+
+        fc = (
+            (resp or {})
+            .get("service_response", {})
+            .get(weather_entity, {})
+            .get("forecast", [])
+        )
+        rows: list[dict[str, Any]] = []
+        for p in fc:
+            ts = dt_util.parse_datetime(p.get("datetime"))
+            if not ts:
+                continue
+            cloud = _parse_float(p.get("cloud_coverage"))
+            prob = _parse_float(p.get("precipitation_probability"))
+            cond = (p.get("condition") or "").lower()
+            rows.append(
+                {
+                    "ts": ts,
+                    "condition": cond,
+                    "cloud_coverage": cloud,
+                    "precipitation_probability": prob,
+                    "factor": _weather_factor(cond, cloud, prob),
+                }
+            )
+        rows.sort(key=lambda r: r["ts"])
+        return rows
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        cfg = self.cfg
+
+        battery_entity = cfg.get(CONF_BATTERY_ENTITY)
+        voltage_entity = cfg.get(CONF_VOLTAGE_ENTITY)
+        weather_entity = cfg.get(CONF_WEATHER_ENTITY)
+
+        if not battery_entity:
+            raise UpdateFailed("Battery entity is required")
+
+        start_hour = int(cfg.get(CONF_START_HOUR, DEFAULT_START_HOUR))
+        cells_current = int(cfg.get(CONF_CELLS_CURRENT, DEFAULT_CELLS_CURRENT))
+        cell_mah = float(cfg.get(CONF_CELL_MAH, DEFAULT_CELL_MAH))
+        cell_v = float(cfg.get(CONF_CELL_V, DEFAULT_CELL_V))
+        horizon_days = int(cfg.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS))
+
+        now_local = dt_util.now()
+        start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        start_utc = start_local.astimezone(UTC)
+
+        batt_rows = await self._async_fetch_history(battery_entity, start_utc)
+        volt_rows = await self._async_fetch_history(voltage_entity, start_utc) if voltage_entity else []
+
+        if len(batt_rows) < 2:
+            raise UpdateFailed("Not enough battery history yet")
+
+        weather_hist_points = await self._async_fetch_weather_history(weather_entity, start_utc) if weather_entity else []
+
+        weather_forecast_points = await self._async_weather_forecast_hourly(weather_entity) if weather_entity else []
+
+        lat = float(self.hass.config.latitude)
+        lon = float(self.hass.config.longitude)
+
+        def nearest(samples: list[Sample], ts: datetime) -> float | None:
+            if not samples:
+                return None
+            return min(samples, key=lambda s: abs((s.ts - ts).total_seconds())).value
+
+        cap_wh_current = cells_current * (cell_mah / 1000.0) * cell_v
+        intervals: list[dict[str, Any]] = []
+        x: list[float] = []
+        y: list[float] = []
+
+        for i in range(1, len(batt_rows)):
+            p = batt_rows[i - 1]
+            c = batt_rows[i]
+            dt_h = (c.ts - p.ts).total_seconds() / 3600.0
+            if dt_h <= 0:
+                continue
+            mid = p.ts + (c.ts - p.ts) / 2
+            elev, az = _solar_position_utc(mid, lat, lon)
+            sun_proxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
+            w_hist, w_cond = _weather_factor_at(weather_hist_points, mid)
+            proxy = sun_proxy * w_hist
+            dsoc = c.value - p.value
+            net_obs = cap_wh_current * (dsoc / 100.0) / dt_h
+            x.append(proxy)
+            y.append(net_obs)
+            intervals.append(
+                {
+                    "tm": mid.isoformat(),
+                    "dt_h": dt_h,
+                    "soc0": p.value,
+                    "soc1": c.value,
+                    "dsoc": dsoc,
+                    "sun_elev_deg": elev,
+                    "sun_az_deg": az,
+                    "sun_proxy": sun_proxy,
+                    "weather_factor_hist": w_hist,
+                    "weather_condition_hist": w_cond,
+                    "voltage": nearest(volt_rows, mid),
+                    "net_power_obs_w": net_obs,
+                }
+            )
+
+        if not intervals:
+            raise UpdateFailed("No valid intervals")
+
+        night_obs = [p for p, sx in zip(y, x) if sx <= 0.01]
+        if night_obs:
+            load_w = max(0.0, -_mean(night_obs))
+        else:
+            load_w = max(0.0, -_mean(y))
+
+        day_xy = [(sx, p + load_w) for p, sx in zip(y, x) if sx > 0.01]
+        if day_xy:
+            num = sum(sx * yp for sx, yp in day_xy)
+            den = sum(sx * sx for sx, _ in day_xy)
+            solar_peak_w = max(0.0, num / den) if den > 0 else 0.0
+        else:
+            solar_peak_w = max(0.0, _mean(y) + load_w)
+
+        for it in intervals:
+            p_clear = solar_peak_w * it["sun_proxy"]
+            p_prod = p_clear * it["weather_factor_hist"]
+            it["production_clear_w"] = p_clear
+            it["production_w"] = p_prod
+            it["consumption_w"] = load_w
+            it["net_power_model_w"] = -load_w + p_prod
+
+        latest_soc = batt_rows[-1].value
+        latest_ts = batt_rows[-1].ts
+
+        step_min = 10
+        steps = int((max(1, min(14, horizon_days)) * 24 * 60) / step_min)
+        times: list[str] = []
+        solar_proxy: list[float] = []
+        solar_elev: list[float] = []
+        weather_factor: list[float] = []
+
+        for i in range(steps + 1):
+            t = latest_ts + timedelta(minutes=i * step_min)
+            elev, _ = _solar_position_utc(t, lat, lon)
+            sproxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
+            wf, _ = _weather_factor_at(weather_forecast_points, t)
+            times.append(t.isoformat())
+            solar_proxy.append(sproxy)
+            solar_elev.append(elev)
+            weather_factor.append(wf)
+
+        def simulate(cells: int, use_weather: bool) -> list[float]:
+            cap_wh = cells * (cell_mah / 1000.0) * cell_v
+            soc = float(latest_soc)
+            out = [soc]
+            dt_h = step_min / 60.0
+            for i in range(1, len(times)):
+                wf = weather_factor[i] if use_weather else 1.0
+                p_prod = solar_peak_w * solar_proxy[i] * wf
+                p_net = -load_w + p_prod
+                soc += (p_net * dt_h / cap_wh) * 100.0
+                soc = max(0.0, min(100.0, soc))
+                out.append(soc)
+            return out
+
+        forecast = {
+            "times": times,
+            "solar_proxy": solar_proxy,
+            "solar_elev": solar_elev,
+            "weather_factor": weather_factor,
+            "latest_soc": latest_soc,
+            "scenarios": {str(c): simulate(c, True) for c in [2, 4, 6]},
+            "scenarios_clear": {str(c): simulate(c, False) for c in [2, 4, 6]},
+        }
+
+        return {
+            ATTR_META: {
+                "name": cfg.get(CONF_NAME),
+                "battery_entity": battery_entity,
+                "voltage_entity": voltage_entity,
+                "weather_entity": weather_entity,
+                "start_hour": start_hour,
+                "cells_current": cells_current,
+                "cell_mah": cell_mah,
+                "cell_v": cell_v,
+                "horizon_days": horizon_days,
+                "latest_local": latest_ts.astimezone(dt_util.DEFAULT_TIME_ZONE).isoformat(),
+            },
+            ATTR_MODEL: {
+                "load_w": load_w,
+                "solar_peak_w": solar_peak_w,
+                "avg_net_w_observed": _mean(y),
+            },
+            ATTR_HISTORY_SOC: [{"t": s.ts.isoformat(), "v": s.value} for s in batt_rows],
+            ATTR_HISTORY_VOLTAGE: [{"t": s.ts.isoformat(), "v": s.value} for s in volt_rows],
+            ATTR_HISTORY_WEATHER: [
+                {
+                    "t": p["ts"].isoformat(),
+                    "condition": p.get("condition", ""),
+                    "cloud_coverage": p.get("cloud_coverage"),
+                    "factor": p.get("factor", 1.0),
+                }
+                for p in weather_hist_points
+            ],
+            ATTR_INTERVALS: intervals,
+            ATTR_FORECAST: forecast,
+            "native_value": round(latest_soc, 2),
+        }
+
+
+import logging
+
+_LOGGER = logging.getLogger(__name__)
