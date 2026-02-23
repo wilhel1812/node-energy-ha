@@ -23,12 +23,12 @@ git remote add origin <YOUR_NODE_ENERGY_HA_REPO_URL>
 
 ## 4) Install setup helper card (recommended)
 - HACS -> Custom repositories -> add `https://github.com/wilhel1812/node-energy-card` as `Dashboard`
-- Install `Battery Telemetry Setup Card`
-- Add card type `custom:battery-telemetry-setup-card`
-- Pick entity and click `Copy Dashboard Config`
+- Install `Battery Telemetry Card`
+- Add card type `custom:battery-telemetry-card`
+- Pick entity in UI editor and save
 
 ## 5) Add integration + chart
 - Settings -> Devices & Services -> Add Integration -> `Battery Telemetry Forecast`
 - Configure battery/weather/start hour etc.
 - Install `ApexCharts Card` from HACS Frontend.
-- Dashboard -> Edit -> Raw configuration editor -> Paste -> Save.
+- Add `custom:battery-telemetry-card` in dashboard and save.

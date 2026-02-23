@@ -11,7 +11,7 @@ This integration now exposes precomputed chart series in `sensor.<your_node_ener
 3. Restart Home Assistant.
 4. Add integration: Settings -> Devices & Services -> Add Integration -> `Battery Telemetry Forecast`.
 5. Install `ApexCharts Card` from HACS Frontend.
-6. Optional (recommended for setup UX): install `Battery Telemetry Setup Card` dashboard plugin:
+6. Optional (recommended UI): install `Battery Telemetry Card` dashboard plugin:
    - https://github.com/wilhel1812/node-energy-card
 
 ## UI Config per entry
@@ -28,10 +28,9 @@ You can create multiple entries for multiple nodes.
 Install [ApexCharts Card](https://github.com/RomRider/apexcharts-card) from HACS (Dashboard).
 
 ## Fast setup
-1. Add `custom:battery-telemetry-setup-card` to any dashboard.
+1. Add `custom:battery-telemetry-card` to any dashboard.
 2. Pick your Battery Telemetry sensor from the dropdown.
-3. Click `Copy Dashboard Config`.
-4. Paste into Dashboard -> Edit -> Raw configuration editor.
+3. Save. No raw configuration templates required.
 
 Then add a single chart card (example):
 
@@ -135,7 +134,7 @@ Replace `sensor.wam6` with your Battery Telemetry sensor.
 Run from integration repo:
 
 ```bash
-./scripts/release_both.sh 0.3.0
+./scripts/release_both.sh 0.4.0
 ```
 
 This publishes matching tags for the integration and setup-card repos.
