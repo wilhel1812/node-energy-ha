@@ -11,6 +11,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ATTR_APEX_SERIES,
     ATTR_FORECAST,
     ATTR_HISTORY_SOC,
     ATTR_HISTORY_VOLTAGE,
@@ -459,14 +460,41 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 out.append(soc)
             return out
 
+        scenario_cells = sorted({cells_current, *range(1, 13)})
+
         forecast = {
             "times": times,
             "solar_proxy": solar_proxy,
             "solar_elev": solar_elev,
             "weather_factor": weather_factor,
             "latest_soc": latest_soc,
-            "scenarios": {str(c): simulate(c, True) for c in [2, 4, 6]},
-            "scenarios_clear": {str(c): simulate(c, False) for c in [2, 4, 6]},
+            "scenarios": {str(c): simulate(c, True) for c in scenario_cells},
+            "scenarios_clear": {str(c): simulate(c, False) for c in scenario_cells},
+        }
+
+        soc_actual = [{"x": s.ts.isoformat(), "y": s.value} for s in batt_rows]
+        soc_projection_weather = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios"].get(str(cells_current), []), strict=False)]
+        soc_projection_clear = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios_clear"].get(str(cells_current), []), strict=False)]
+        sun_history = [{"x": it["tm"], "y": it["sun_elev_deg"]} for it in intervals]
+        sun_forecast = [{"x": t, "y": e} for t, e in zip(times, solar_elev, strict=False)]
+        power_observed = [{"x": it["tm"], "y": it["net_power_obs_w"]} for it in intervals]
+        power_modeled = [{"x": it["tm"], "y": it["net_power_model_w"]} for it in intervals]
+        power_prod_weather = [{"x": it["tm"], "y": it["production_w"]} for it in intervals]
+        power_prod_clear = [{"x": it["tm"], "y": it["production_clear_w"]} for it in intervals]
+        power_consumption = [{"x": it["tm"], "y": it["consumption_w"]} for it in intervals]
+
+        apex_series = {
+            "now": latest_ts.isoformat(),
+            "soc_actual": soc_actual,
+            "soc_projection_weather": soc_projection_weather,
+            "soc_projection_clear": soc_projection_clear,
+            "sun_history": sun_history,
+            "sun_forecast": sun_forecast,
+            "power_observed": power_observed,
+            "power_modeled": power_modeled,
+            "power_production_weather": power_prod_weather,
+            "power_production_clear": power_prod_clear,
+            "power_consumption": power_consumption,
         }
 
         return {
@@ -501,6 +529,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ],
             ATTR_INTERVALS: intervals,
             ATTR_FORECAST: forecast,
+            ATTR_APEX_SERIES: apex_series,
             "native_value": round(latest_soc, 2),
         }
 

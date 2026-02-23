@@ -1,51 +1,122 @@
 # Node Energy (Home Assistant Integration)
 
-Node-generic Home Assistant integration for battery/solar modeling and forecast.
+Home Assistant integration for battery/solar modeling and forecast.
 
-## What this package contains
-- `custom_components/node_energy`: integration (config flow + options flow + sensor + service)
-- `www/node-energy-card.js`: local copy of the card for manual install/testing
+## Pivot: ApexCharts-first
+This integration now exposes precomputed chart series in `sensor.<your_node_energy_sensor>.attributes.apex_series` so you can use **ApexCharts Card** as the primary UI.
 
-For UI-managed updates of both backend and card, publish as **two HACS repos**:
-1. Integration repo (this package)
-2. Dashboard plugin repo (`ha-node-energy-card` package)
+## Install (HACS)
+1. Add this repo as custom repository in HACS, category `Integration`.
+2. Install `Node Energy`.
+3. Restart Home Assistant.
+4. Add integration: Settings -> Devices & Services -> Add Integration -> `Node Energy`.
 
-## HACS Install (Integration)
-1. Push this folder as its own GitHub repository.
-2. In HACS: 3 dots -> Custom repositories.
-3. Add repo URL, Category = `Integration`.
-4. Install `Node Energy` from HACS.
-5. Restart Home Assistant.
-6. Add integration: Settings -> Devices & Services -> Add Integration -> `Node Energy`.
-
-## UI Config (per entry)
-- `battery_entity` (required): battery percentage sensor for the node
+## UI Config per entry
+- `battery_entity` (required)
 - `voltage_entity` (optional)
 - `weather_entity` (optional)
-- `start_hour` (0-23): analysis start hour (yesterday at this hour)
+- `start_hour` (0-23)
+- `start_date` (optional; use this to cut off bad pre-solar data)
 - `cells_current`, `cell_mah`, `cell_v`, `horizon_days`
 
-Create multiple entries for multiple nodes.
+You can create multiple entries for multiple nodes.
+
+## ApexCharts setup
+Install [ApexCharts Card](https://github.com/RomRider/apexcharts-card) from HACS (Dashboard).
+
+Then add a single chart card (example):
+
+```yaml
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Node Energy
+graph_span: 72h
+now:
+  show: true
+  label: Now
+apex_config:
+  chart:
+    height: 680
+    toolbar:
+      show: true
+  legend:
+    show: true
+  xaxis:
+    type: datetime
+    labels:
+      datetimeUTC: false
+      format: dd MMM HH:mm
+  stroke:
+    width: [3, 3, 2, 2, 2, 2, 2, 2]
+  yaxis:
+    - id: soc
+      min: 0
+      max: 100
+      decimalsInFloat: 1
+      title: { text: "SOC %" }
+    - id: power
+      opposite: true
+      title: { text: "Power W" }
+    - id: sun
+      opposite: true
+      min: -90
+      max: 90
+      title: { text: "Sun elev °" }
+series:
+  - entity: sensor.wam6
+    name: SOC (history)
+    yaxis_id: soc
+    data_generator: return (entity.attributes.apex_series?.soc_actual || []).map(p => [new Date(p.x).getTime(), p.y]);
+  - entity: sensor.wam6
+    name: SOC (projection weather)
+    yaxis_id: soc
+    data_generator: return (entity.attributes.apex_series?.soc_projection_weather || []).map(p => [new Date(p.x).getTime(), p.y]);
+  - entity: sensor.wam6
+    name: SOC (projection clear sky)
+    yaxis_id: soc
+    data_generator: return (entity.attributes.apex_series?.soc_projection_clear || []).map(p => [new Date(p.x).getTime(), p.y]);
+    stroke_dash: 6
+  - entity: sensor.wam6
+    name: Observed net W
+    yaxis_id: power
+    data_generator: return (entity.attributes.apex_series?.power_observed || []).map(p => [new Date(p.x).getTime(), p.y]);
+  - entity: sensor.wam6
+    name: Modeled net W
+    yaxis_id: power
+    data_generator: return (entity.attributes.apex_series?.power_modeled || []).map(p => [new Date(p.x).getTime(), p.y]);
+  - entity: sensor.wam6
+    name: Production W (weather)
+    yaxis_id: power
+    data_generator: return (entity.attributes.apex_series?.power_production_weather || []).map(p => [new Date(p.x).getTime(), p.y]);
+  - entity: sensor.wam6
+    name: Production W (clear sky)
+    yaxis_id: power
+    stroke_dash: 6
+    data_generator: return (entity.attributes.apex_series?.power_production_clear || []).map(p => [new Date(p.x).getTime(), p.y]);
+  - entity: sensor.wam6
+    name: Consumption W
+    yaxis_id: power
+    data_generator: return (entity.attributes.apex_series?.power_consumption || []).map(p => [new Date(p.x).getTime(), p.y]);
+  - entity: sensor.wam6
+    name: Sun elevation (history)
+    yaxis_id: sun
+    data_generator: return (entity.attributes.apex_series?.sun_history || []).map(p => [new Date(p.x).getTime(), p.y]);
+  - entity: sensor.wam6
+    name: Sun elevation (forecast)
+    yaxis_id: sun
+    stroke_dash: 6
+    data_generator: return (entity.attributes.apex_series?.sun_forecast || []).map(p => [new Date(p.x).getTime(), p.y]);
+```
+
+Replace `sensor.wam6` with your Node Energy sensor.
 
 ## Service
 `node_energy.refresh`
-- Optional `entry_id` field (refresh one entry)
-- Without `entry_id`, refreshes all entries
+- Optional `entry_id` to refresh one entry.
+- Without `entry_id`, refreshes all entries.
 
-## Release / Update Process
-1. Update code.
-2. Bump integration version:
-   ```bash
-   ./scripts/bump_version.sh 0.1.2
-   ```
-3. Commit and tag:
-   ```bash
-   git commit -am "Release v0.1.2"
-   git tag v0.1.2
-   git push && git push --tags
-   ```
-4. In Home Assistant, open HACS and click `Update`.
-
-## Local manual install (fallback)
-1. Copy `custom_components/node_energy` -> `<HA config>/custom_components/node_energy`
-2. Restart Home Assistant
+## Notes
+- Card updates live as HA state updates arrive.
+- ApexCharts handles tooltip/cursor/highlighting natively.
+- `www/node-energy-card.js` remains as legacy fallback; ApexCharts is recommended.

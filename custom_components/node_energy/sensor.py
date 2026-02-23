@@ -6,7 +6,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import ATTR_FORECAST, ATTR_HISTORY_SOC, ATTR_HISTORY_VOLTAGE, ATTR_HISTORY_WEATHER, ATTR_INTERVALS, ATTR_META, ATTR_MODEL, DOMAIN
+from .const import ATTR_APEX_SERIES, ATTR_FORECAST, ATTR_HISTORY_SOC, ATTR_HISTORY_VOLTAGE, ATTR_HISTORY_WEATHER, ATTR_INTERVALS, ATTR_META, ATTR_MODEL, DOMAIN
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -41,4 +41,5 @@ class NodeEnergySensor(CoordinatorEntity, SensorEntity):
             ATTR_HISTORY_WEATHER: d.get(ATTR_HISTORY_WEATHER),
             ATTR_INTERVALS: d.get(ATTR_INTERVALS),
             ATTR_FORECAST: d.get(ATTR_FORECAST),
+            ATTR_APEX_SERIES: d.get(ATTR_APEX_SERIES),
         }
