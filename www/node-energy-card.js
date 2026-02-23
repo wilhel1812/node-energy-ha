@@ -1,13 +1,17 @@
 class NodeEnergyCard extends HTMLElement {
   static getStubConfig(hass) {
-    const sensorIds = Object.keys((hass && hass.states) || {}).filter((eid) =>
-      eid.startsWith("sensor.")
-    );
     const preferred =
-      sensorIds.find((eid) => eid.includes("node_energy")) ||
-      sensorIds.find((eid) => eid.includes("wam")) ||
-      sensorIds[0] ||
-      "";
+      Object.entries((hass && hass.states) || {})
+        .filter(
+          ([eid, st]) =>
+            eid.startsWith("sensor.") &&
+            st &&
+            st.attributes &&
+            st.attributes.forecast &&
+            st.attributes.intervals &&
+            st.attributes.model
+        )
+        .map(([eid]) => eid)[0] || "";
     return {
       entity: preferred,
       cells: 2,
@@ -20,10 +24,8 @@ class NodeEnergyCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config.entity) {
-      throw new Error("You need to define entity");
-    }
     this._config = {
+      entity: "",
       cells: 2,
       days: 7,
       ...config,
@@ -228,24 +230,51 @@ class NodeEnergyCardEditor extends HTMLElement {
 
   _render() {
     if (!this._hass || !this._config) return;
-    const sensors = Object.keys(this._hass.states || {})
-      .filter((eid) => eid.startsWith("sensor."))
-      .sort();
+    const validSensors = Object.entries(this._hass.states || {})
+      .filter(
+        ([eid, st]) =>
+          eid.startsWith("sensor.") &&
+          st &&
+          st.attributes &&
+          st.attributes.forecast &&
+          st.attributes.intervals &&
+          st.attributes.model
+      )
+      .map(([eid, st]) => ({
+        eid,
+        name: st.attributes.friendly_name || eid,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    if (!this._config.entity && validSensors.length) {
+      this._config = { ...this._config, entity: validSensors[0].eid };
+      this._emitChanged();
+    }
 
     this.innerHTML = `
       <style>
         .wrap { display: grid; gap: 10px; }
         .row { display: grid; gap: 4px; }
         label { font-size: 12px; color: var(--secondary-text-color); }
-        input { padding: 8px; border: 1px solid var(--divider-color); border-radius: 6px; background: var(--card-background-color); color: var(--primary-text-color); }
+        input, select { padding: 8px; border: 1px solid var(--divider-color); border-radius: 6px; background: var(--card-background-color); color: var(--primary-text-color); }
       </style>
       <div class="wrap">
         <div class="row">
           <label>Entity</label>
-          <input id="entity" list="node-energy-sensors" value="${this._config.entity || ""}" placeholder="sensor.node_energy..." />
-          <datalist id="node-energy-sensors">
-            ${sensors.map((s) => `<option value="${s}"></option>`).join("")}
-          </datalist>
+          <select id="entity">
+            ${
+              validSensors.length
+                ? validSensors
+                    .map(
+                      (s) =>
+                        `<option value="${s.eid}" ${
+                          s.eid === this._config.entity ? "selected" : ""
+                        }>${s.name} (${s.eid})</option>`
+                    )
+                    .join("")
+                : '<option value="">No valid Node Energy entities found</option>'
+            }
+          </select>
         </div>
         <div class="row">
           <label>Cells</label>
@@ -259,7 +288,7 @@ class NodeEnergyCardEditor extends HTMLElement {
     `;
 
     this.querySelector("#entity")?.addEventListener("change", (ev) => {
-      this._config = { ...this._config, entity: ev.target.value.trim() };
+      this._config = { ...this._config, entity: ev.target.value };
       this._emitChanged();
     });
     this.querySelector("#cells")?.addEventListener("change", (ev) => {
