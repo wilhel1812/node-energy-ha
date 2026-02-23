@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.components.frontend import async_register_built_in_panel
+from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config import ConfigType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -15,7 +15,7 @@ PANEL_COMPONENT = "node-energy-setup-panel"
 PANEL_URL_PATH = "node-energy-setup"
 PANEL_STATIC_DIR_URL = "/api/node_energy_panel"
 PANEL_MODULE = "node-energy-setup-panel.js"
-PANEL_MODULE_VERSION = "0.1.7"
+PANEL_MODULE_VERSION = "0.1.8"
 DATA_PANEL_REGISTERED = f"{DOMAIN}_panel_registered"
 
 
@@ -27,20 +27,14 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     await hass.http.async_register_static_paths(
         [StaticPathConfig(f"{PANEL_STATIC_DIR_URL}/{PANEL_MODULE}", str(module_path), True)]
     )
-    async_register_built_in_panel(
+    async_register_panel(
         hass,
-        "custom",
-        "Node Energy Setup",
-        "mdi:chart-line",
-        PANEL_URL_PATH,
-        {
-            "_panel_custom": {
-                "name": PANEL_COMPONENT,
-                "module_url": f"{PANEL_STATIC_DIR_URL}/{PANEL_MODULE}?v={PANEL_MODULE_VERSION}",
-                "trust_external_script": False,
-            }
-        },
-        False,
+        webcomponent_name=PANEL_COMPONENT,
+        frontend_url_path=PANEL_URL_PATH,
+        sidebar_title="Node Energy Setup",
+        sidebar_icon="mdi:chart-line",
+        module_url=f"{PANEL_STATIC_DIR_URL}/{PANEL_MODULE}?v={PANEL_MODULE_VERSION}",
+        require_admin=False,
     )
     hass.data[DATA_PANEL_REGISTERED] = True
 
