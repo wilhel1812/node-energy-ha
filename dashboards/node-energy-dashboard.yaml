@@ -1,4 +1,4 @@
-title: Node Energy
+title: Battery Telemetry
 views:
   - title: Overview
     path: overview
@@ -9,7 +9,7 @@ views:
           - type: custom:apexcharts-card
             header:
               show: true
-              title: Node Energy
+              title: Battery Telemetry
             graph_span: 72h
             now:
               show: true

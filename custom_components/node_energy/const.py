@@ -12,7 +12,7 @@ CONF_CELL_MAH = "cell_mah"
 CONF_CELL_V = "cell_v"
 CONF_HORIZON_DAYS = "horizon_days"
 
-DEFAULT_NAME = "Node Energy"
+DEFAULT_NAME = "Battery Telemetry Forecast"
 DEFAULT_START_HOUR = 16
 DEFAULT_CELLS_CURRENT = 2
 DEFAULT_CELL_MAH = 3500

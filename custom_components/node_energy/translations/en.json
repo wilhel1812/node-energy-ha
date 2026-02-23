@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Node Energy",
+        "title": "Battery Telemetry Forecast",
         "description": "Configure one battery node and optional weather source.",
         "data": {
           "name": "Name",
@@ -14,8 +14,7 @@
           "cells_current": "Current number of cells",
           "cell_mah": "Cell capacity (mAh)",
           "cell_v": "Nominal cell voltage",
-          "horizon_days": "Forecast horizon (days)",
-          "start_date": "Start date (optional)"
+          "horizon_days": "Forecast horizon (days)"
         }
       }
     }
@@ -23,7 +22,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "Node Energy Options",
+        "title": "Battery Telemetry Forecast Options",
         "data": {
           "name": "Name",
           "battery_entity": "Battery percent entity",
@@ -34,16 +33,15 @@
           "cells_current": "Current number of cells",
           "cell_mah": "Cell capacity (mAh)",
           "cell_v": "Nominal cell voltage",
-          "horizon_days": "Forecast horizon (days)",
-          "start_date": "Start date (optional)"
+          "horizon_days": "Forecast horizon (days)"
         }
       }
     }
   },
   "services": {
     "refresh": {
-      "name": "Refresh Node Energy",
-      "description": "Force immediate refresh/recompute for one or all Node Energy entries.",
+      "name": "Refresh Battery Telemetry Forecast",
+      "description": "Force immediate refresh/recompute for one or all Battery Telemetry Forecast entries.",
       "fields": {
         "entry_id": {
           "name": "Entry ID",

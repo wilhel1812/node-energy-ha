@@ -1,6 +1,6 @@
 refresh:
-  name: Refresh Node Energy
-  description: Force immediate refresh/recompute for one or all Node Energy entries.
+  name: Refresh Battery Telemetry Forecast
+  description: Force immediate refresh/recompute for one or all Battery Telemetry Forecast entries.
   fields:
     entry_id:
       name: Entry ID

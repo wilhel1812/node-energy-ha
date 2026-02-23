@@ -14,7 +14,7 @@ git remote add origin <YOUR_NODE_ENERGY_HA_REPO_URL>
 ## 2) Install from HACS (UI)
 - HACS -> 3 dots -> Custom repositories
 - Add integration repo URL as category `Integration`
-- Install `Node Energy`
+- Install `Battery Telemetry Forecast`
 - Restart Home Assistant
 
 ## 3) Install ApexCharts Card
@@ -23,12 +23,12 @@ git remote add origin <YOUR_NODE_ENERGY_HA_REPO_URL>
 
 ## 4) Install setup helper card (recommended)
 - HACS -> Custom repositories -> add `https://github.com/wilhel1812/node-energy-card` as `Dashboard`
-- Install `Node Energy Card`
-- Add card type `custom:node-energy-setup-card`
+- Install `Battery Telemetry Setup Card`
+- Add card type `custom:battery-telemetry-setup-card`
 - Pick entity and click `Copy Dashboard Config`
 
 ## 5) Add integration + chart
-- Settings -> Devices & Services -> Add Integration -> `Node Energy`
+- Settings -> Devices & Services -> Add Integration -> `Battery Telemetry Forecast`
 - Configure battery/weather/start hour etc.
 - Install `ApexCharts Card` from HACS Frontend.
 - Dashboard -> Edit -> Raw configuration editor -> Paste -> Save.
