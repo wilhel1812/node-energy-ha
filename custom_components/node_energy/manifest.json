@@ -1,10 +1,10 @@
 {
   "domain": "node_energy",
   "name": "Node Energy",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "documentation": "https://github.com/wilhel1812/node-energy-ha",
   "issue_tracker": "https://github.com/wilhel1812/node-energy-ha/issues",
-  "dependencies": ["recorder", "frontend", "panel_custom"],
+  "dependencies": ["recorder"],
   "codeowners": [],
   "config_flow": true,
   "iot_class": "calculated",

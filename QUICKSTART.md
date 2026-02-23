@@ -25,6 +25,6 @@ git remote add origin <YOUR_NODE_ENERGY_HA_REPO_URL>
 - Settings -> Devices & Services -> Add Integration -> `Node Energy`
 - Configure battery/weather/start hour etc.
 - Install `ApexCharts Card` from HACS Frontend.
-- Open sidebar -> `Node Energy Setup`.
-- Pick entity and click `Copy Dashboard Config`.
+- Open `/dashboards/node-energy-dashboard.yaml`
+- Replace `sensor.wam6` with your sensor entity
 - Dashboard -> Edit -> Raw configuration editor -> Paste -> Save.
