@@ -11,6 +11,8 @@ This integration now exposes precomputed chart series in `sensor.<your_node_ener
 3. Restart Home Assistant.
 4. Add integration: Settings -> Devices & Services -> Add Integration -> `Node Energy`.
 5. Install `ApexCharts Card` from HACS Frontend.
+6. Optional (recommended for setup UX): install `Node Energy Setup Card` dashboard plugin:
+   - https://github.com/wilhel1812/node-energy-card
 
 ## UI Config per entry
 - `battery_entity` (required)
@@ -26,9 +28,10 @@ You can create multiple entries for multiple nodes.
 Install [ApexCharts Card](https://github.com/RomRider/apexcharts-card) from HACS (Dashboard).
 
 ## Fast setup
-1. Open `/dashboards/node-energy-dashboard.yaml` in this repo.
-2. Replace `sensor.wam6` with your Node Energy sensor entity.
-3. Paste into Dashboard -> Edit -> Raw configuration editor.
+1. Add `custom:node-energy-setup-card` to any dashboard.
+2. Pick your Node Energy sensor from the dropdown.
+3. Click `Copy Dashboard Config`.
+4. Paste into Dashboard -> Edit -> Raw configuration editor.
 
 Then add a single chart card (example):
 
