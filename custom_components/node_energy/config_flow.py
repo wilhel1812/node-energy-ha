@@ -14,6 +14,7 @@ from .const import (
     CONF_CELLS_CURRENT,
     CONF_HORIZON_DAYS,
     CONF_NAME,
+    CONF_START_DATE,
     CONF_START_HOUR,
     CONF_VOLTAGE_ENTITY,
     CONF_WEATHER_ENTITY,
@@ -55,6 +56,10 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=23, step=1, mode=selector.NumberSelectorMode.BOX)
             ),
+            vol.Optional(
+                CONF_START_DATE,
+                default=defaults.get(CONF_START_DATE),
+            ): selector.DateSelector(),
             vol.Required(
                 CONF_CELLS_CURRENT,
                 default=defaults.get(CONF_CELLS_CURRENT, DEFAULT_CELLS_CURRENT),

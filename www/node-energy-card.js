@@ -143,15 +143,15 @@ class NodeEnergyCard extends HTMLElement {
     const nowX = histSeries.length ? histSeries[histSeries.length - 1].x : projWeather[0].x;
 
     const w = 1000;
-    const h = 640;
+    const h = 700;
     const padL = 58;
     const padR = 18;
     const padT = 18;
     const padB = 46;
-    const gap = 16;
-    const r1H = 250;
-    const r2H = 130;
-    const r3H = 150;
+    const gap = 14;
+    const r1H = 120;
+    const r2H = 90;
+    const r3H = 360;
     const r1Y = padT;
     const r2Y = r1Y + r1H + gap;
     const r3Y = r2Y + r2H + gap;
@@ -169,8 +169,8 @@ class NodeEnergyCard extends HTMLElement {
     const sunY = (v) => mapY(v, sunYMin, sunYMax, r2Y, r2H);
     const powY = (v) => mapY(v, powYMin, powYMax, r3Y, r3H);
 
-    const socHistPts = this._polyline(histSeries, mapX, socY);
-    const socWPts = this._polyline(projWeather, mapX, socY);
+    const socCombined = [...histSeries, ...projWeather.slice(1)];
+    const socPts = this._polyline(socCombined, mapX, socY);
     const socCPts = this._polyline(projClear, mapX, socY);
 
     const sunHistPts = this._polyline(histSunSeries, mapX, sunY);
@@ -212,8 +212,7 @@ class NodeEnergyCard extends HTMLElement {
             <line x1="${x0}" y1="${r3Y + r3H}" x2="${x1}" y2="${r3Y + r3H}" class="axis"></line>
             <line x1="${x0}" y1="${r1Y}" x2="${x0}" y2="${r3Y + r3H}" class="axis"></line>
 
-            <polyline points="${socHistPts}" class="hist"></polyline>
-            <polyline points="${socWPts}" class="projw"></polyline>
+            <polyline points="${socPts}" class="soc"></polyline>
             <polyline points="${socCPts}" class="projc"></polyline>
 
             <polyline points="${sunHistPts}" class="sunh"></polyline>
@@ -242,17 +241,17 @@ class NodeEnergyCard extends HTMLElement {
               .join("")}
           </svg>
 
+          <div id="tooltip" class="tooltip hidden"></div>
           <div class="legend">
-            <span><i class="dot hist"></i>SOC history</span>
-            <span><i class="dot projw"></i>SOC projection (weather)</span>
-            <span><i class="dot projc"></i>SOC projection (clear)</span>
-            <span><i class="dot sunh"></i>Sun elevation (history)</span>
-            <span><i class="dot sunf"></i>Sun elevation (forecast)</span>
-            <span><i class="dot pobs"></i>Observed net W</span>
-            <span><i class="dot pmodel"></i>Modeled net W</span>
-            <span><i class="dot pprodw"></i>Production W (weather)</span>
-            <span><i class="dot pprodc"></i>Production W (clear)</span>
-            <span><i class="dot pcons"></i>Consumption W</span>
+            <span class="lg" data-target="soc"><i class="dot soc"></i>SOC (history + projection)</span>
+            <span class="lg" data-target="projc"><i class="dot projc"></i>SOC projection (clear)</span>
+            <span class="lg" data-target="sunh"><i class="dot sunh"></i>Sun elevation (history)</span>
+            <span class="lg" data-target="sunf"><i class="dot sunf"></i>Sun elevation (forecast)</span>
+            <span class="lg" data-target="pobs"><i class="dot pobs"></i>Observed net W</span>
+            <span class="lg" data-target="pmodel"><i class="dot pmodel"></i>Modeled net W</span>
+            <span class="lg" data-target="pprodw"><i class="dot pprodw"></i>Production W (weather)</span>
+            <span class="lg" data-target="pprodc"><i class="dot pprodc"></i>Production W (clear)</span>
+            <span class="lg" data-target="pcons"><i class="dot pcons"></i>Consumption W</span>
           </div>
         </div>
       </ha-card>
@@ -278,8 +277,7 @@ class NodeEnergyCard extends HTMLElement {
         .xtick { font-size: 10px; fill: var(--secondary-text-color); }
         .now { stroke: var(--secondary-text-color); stroke-width: 1.2; stroke-dasharray: 4 4; }
 
-        .hist { fill: none; stroke: #5f6b7a; stroke-width: 2.4; }
-        .projw { fill: none; stroke: #17a589; stroke-width: 2.8; }
+        .soc { fill: none; stroke: #17a589; stroke-width: 2.8; }
         .projc { fill: none; stroke: #17a589; stroke-width: 1.6; stroke-dasharray: 5 4; }
 
         .sunh { fill: none; stroke: #b45309; stroke-width: 2.1; }
@@ -292,9 +290,9 @@ class NodeEnergyCard extends HTMLElement {
         .pcons { fill: none; stroke: #b91c1c; stroke-width: 1.6; }
 
         .legend { display: flex; gap: 10px; margin-top: 10px; font-size: 12px; color: var(--secondary-text-color); flex-wrap: wrap; }
+        .lg { cursor: pointer; user-select: none; }
         .dot { display: inline-block; width: 10px; height: 10px; border-radius: 999px; margin-right: 6px; vertical-align: -1px; }
-        .dot.hist { background: #5f6b7a; }
-        .dot.projw { background: #17a589; }
+        .dot.soc { background: #17a589; }
         .dot.projc { background: transparent; border: 1px dashed #17a589; }
         .dot.sunh { background: #b45309; }
         .dot.sunf { background: transparent; border: 1px dashed #f59e0b; }
@@ -303,8 +301,88 @@ class NodeEnergyCard extends HTMLElement {
         .dot.pprodw { background: #d97706; }
         .dot.pprodc { background: transparent; border: 1px dashed #94a3b8; }
         .dot.pcons { background: #b91c1c; }
+        .fade { opacity: 0.18; transition: opacity 120ms linear; }
+        .highlight { opacity: 1 !important; stroke-width: 3.2; }
+        .tooltip {
+          position: absolute;
+          z-index: 5;
+          pointer-events: none;
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          padding: 6px 8px;
+          font-size: 12px;
+          box-shadow: 0 2px 10px rgba(0,0,0,0.18);
+        }
+        .hidden { display: none; }
       </style>
     `;
+
+    const svg = this.querySelector("svg.chart");
+    const tooltip = this.querySelector("#tooltip");
+    const cardContent = this.querySelector(".card-content");
+    const seriesByName = {
+      soc: socCombined,
+      projc: projClear,
+      sunh: histSunSeries,
+      sunf: fcSunSeries,
+      pobs: pObs,
+      pmodel: pModel,
+      pprodw: pProdW,
+      pprodc: pProdC,
+      pcons: pCons,
+    };
+    const nearestPoint = (arr, x) => {
+      if (!arr.length) return null;
+      let best = arr[0];
+      let bd = Math.abs(arr[0].x - x);
+      for (let i = 1; i < arr.length; i++) {
+        const d = Math.abs(arr[i].x - x);
+        if (d < bd) {
+          bd = d;
+          best = arr[i];
+        }
+      }
+      return best;
+    };
+
+    svg?.addEventListener("mousemove", (ev) => {
+      const rect = svg.getBoundingClientRect();
+      const rx = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
+      const tx = xMin + (rx / Math.max(1, rect.width)) * (xMax - xMin);
+      const rows = [];
+      for (const [name, arr] of Object.entries(seriesByName)) {
+        const p = nearestPoint(arr, tx);
+        if (p) rows.push(`${name}: ${p.y.toFixed(2)}`);
+      }
+      const date = new Date(tx);
+      tooltip.classList.remove("hidden");
+      tooltip.innerHTML = `<div><b>${date.toLocaleString()}</b></div><div>${rows.join("<br/>")}</div>`;
+      const cRect = cardContent.getBoundingClientRect();
+      tooltip.style.left = `${ev.clientX - cRect.left + 12}px`;
+      tooltip.style.top = `${ev.clientY - cRect.top + 12}px`;
+    });
+    svg?.addEventListener("mouseleave", () => tooltip.classList.add("hidden"));
+
+    const polylines = {};
+    for (const name of Object.keys(seriesByName)) {
+      const el = this.querySelector(`.${name}`);
+      if (el) polylines[name] = el;
+    }
+    this.querySelectorAll(".legend .lg").forEach((el) => {
+      el.addEventListener("mouseenter", () => {
+        const target = el.getAttribute("data-target");
+        Object.entries(polylines).forEach(([name, line]) => {
+          line.classList.remove("fade", "highlight");
+          if (name === target) line.classList.add("highlight");
+          else line.classList.add("fade");
+        });
+      });
+      el.addEventListener("mouseleave", () => {
+        Object.values(polylines).forEach((line) => line.classList.remove("fade", "highlight"));
+      });
+    });
   }
 }
 

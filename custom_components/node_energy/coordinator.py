@@ -24,6 +24,7 @@ from .const import (
     CONF_CELLS_CURRENT,
     CONF_HORIZON_DAYS,
     CONF_NAME,
+    CONF_START_DATE,
     CONF_START_HOUR,
     CONF_VOLTAGE_ENTITY,
     CONF_WEATHER_ENTITY,
@@ -319,13 +320,29 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed("Battery entity is required")
 
         start_hour = int(cfg.get(CONF_START_HOUR, DEFAULT_START_HOUR))
+        start_date = cfg.get(CONF_START_DATE)
         cells_current = int(cfg.get(CONF_CELLS_CURRENT, DEFAULT_CELLS_CURRENT))
         cell_mah = float(cfg.get(CONF_CELL_MAH, DEFAULT_CELL_MAH))
         cell_v = float(cfg.get(CONF_CELL_V, DEFAULT_CELL_V))
         horizon_days = int(cfg.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS))
 
         now_local = dt_util.now()
-        start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        if start_date:
+            parsed_date = dt_util.parse_date(str(start_date))
+            if parsed_date:
+                start_local = datetime(
+                    parsed_date.year,
+                    parsed_date.month,
+                    parsed_date.day,
+                    start_hour,
+                    0,
+                    0,
+                    tzinfo=dt_util.DEFAULT_TIME_ZONE,
+                )
+            else:
+                start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        else:
+            start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
         start_utc = start_local.astimezone(UTC)
 
         batt_rows = await self._async_fetch_history(battery_entity, start_utc)
@@ -459,6 +476,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "voltage_entity": voltage_entity,
                 "weather_entity": weather_entity,
                 "start_hour": start_hour,
+                "start_date": start_local.date().isoformat(),
                 "cells_current": cells_current,
                 "cell_mah": cell_mah,
                 "cell_v": cell_v,
