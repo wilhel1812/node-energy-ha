@@ -32,18 +32,6 @@ class NodeEnergyCard extends HTMLElement {
     return 12;
   }
 
-  _seriesToPoints(series, xMin, xMax, yMin, yMax, w, h, pad) {
-    const points = [];
-    const xSpan = Math.max(1, xMax - xMin);
-    const ySpan = Math.max(1e-6, yMax - yMin);
-    for (const p of series) {
-      const x = pad + ((p.x - xMin) / xSpan) * (w - pad * 2);
-      const y = h - pad - ((p.y - yMin) / ySpan) * (h - pad * 2);
-      points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
-    }
-    return points.join(" ");
-  }
-
   _range(series, fallbackMin, fallbackMax, padPct = 0.12) {
     if (!series.length) return [fallbackMin, fallbackMax];
     let mn = Math.min(...series.map((p) => p.y));
@@ -55,6 +43,11 @@ class NodeEnergyCard extends HTMLElement {
     }
     const span = mx - mn;
     return [mn - span * padPct, mx + span * padPct];
+  }
+
+  _polyline(series, mapX, mapY) {
+    if (!series.length) return "";
+    return series.map((p) => `${mapX(p.x).toFixed(1)},${mapY(p.y).toFixed(1)}`).join(" ");
   }
 
   _render() {
@@ -122,23 +115,12 @@ class NodeEnergyCard extends HTMLElement {
     const xMin = Math.min(...allSoc.map((p) => p.x));
     const xMax = Math.max(...allSoc.map((p) => p.x));
 
-    const w = 980;
-    const hMain = 360;
-    const hSmall = 210;
-    const pad = 44;
-
-    const histPts = this._seriesToPoints(histSeries, xMin, xMax, 0, 100, w, hMain, pad);
-    const projWPts = this._seriesToPoints(projWeather, xMin, xMax, 0, 100, w, hMain, pad);
-    const projCPts = this._seriesToPoints(projClear, xMin, xMax, 0, 100, w, hMain, pad);
-
     const histSunSeries = intervals
       .map((p) => ({ x: new Date(p.tm).getTime(), y: Number(p.sun_elev_deg) }))
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
     const fcSunSeries = ft.slice(0, n + 1).map((x, i) => ({ x, y: Number(fSolarElev[i] || 0) }));
     const allSun = [...histSunSeries, ...fcSunSeries];
     const [sunYMin, sunYMax] = this._range(allSun, -10, 30, 0.08);
-    const histSunPts = this._seriesToPoints(histSunSeries, xMin, xMax, sunYMin, sunYMax, w, hSmall, pad);
-    const fcSunPts = this._seriesToPoints(fcSunSeries, xMin, xMax, sunYMin, sunYMax, w, hSmall, pad);
 
     const intervalSeries = intervals
       .map((p) => ({
@@ -158,14 +140,58 @@ class NodeEnergyCard extends HTMLElement {
     const allPower = [...pObs, ...pModel, ...pProdW, ...pProdC, ...pCons];
     const [powYMin, powYMax] = this._range(allPower, -1, 1, 0.12);
 
-    const pObsPts = this._seriesToPoints(pObs, xMin, xMax, powYMin, powYMax, w, hSmall, pad);
-    const pModelPts = this._seriesToPoints(pModel, xMin, xMax, powYMin, powYMax, w, hSmall, pad);
-    const pProdWPts = this._seriesToPoints(pProdW, xMin, xMax, powYMin, powYMax, w, hSmall, pad);
-    const pProdCPts = this._seriesToPoints(pProdC, xMin, xMax, powYMin, powYMax, w, hSmall, pad);
-    const pConsPts = this._seriesToPoints(pCons, xMin, xMax, powYMin, powYMax, w, hSmall, pad);
-
     const nowX = histSeries.length ? histSeries[histSeries.length - 1].x : projWeather[0].x;
-    const nowSvgX = pad + ((nowX - xMin) / Math.max(1, xMax - xMin)) * (w - pad * 2);
+
+    const w = 1000;
+    const h = 640;
+    const padL = 58;
+    const padR = 18;
+    const padT = 18;
+    const padB = 46;
+    const gap = 16;
+    const r1H = 250;
+    const r2H = 130;
+    const r3H = 150;
+    const r1Y = padT;
+    const r2Y = r1Y + r1H + gap;
+    const r3Y = r2Y + r2H + gap;
+
+    const x0 = padL;
+    const x1 = w - padR;
+    const xSpan = Math.max(1, xMax - xMin);
+    const mapX = (x) => x0 + ((x - xMin) / xSpan) * (x1 - x0);
+    const mapY = (y, yMin, yMax, top, height) => {
+      const span = Math.max(1e-9, yMax - yMin);
+      return top + height - ((y - yMin) / span) * height;
+    };
+
+    const socY = (v) => mapY(v, 0, 100, r1Y, r1H);
+    const sunY = (v) => mapY(v, sunYMin, sunYMax, r2Y, r2H);
+    const powY = (v) => mapY(v, powYMin, powYMax, r3Y, r3H);
+
+    const socHistPts = this._polyline(histSeries, mapX, socY);
+    const socWPts = this._polyline(projWeather, mapX, socY);
+    const socCPts = this._polyline(projClear, mapX, socY);
+
+    const sunHistPts = this._polyline(histSunSeries, mapX, sunY);
+    const sunFcPts = this._polyline(fcSunSeries, mapX, sunY);
+
+    const pObsPts = this._polyline(pObs, mapX, powY);
+    const pModelPts = this._polyline(pModel, mapX, powY);
+    const pProdWPts = this._polyline(pProdW, mapX, powY);
+    const pProdCPts = this._polyline(pProdC, mapX, powY);
+    const pConsPts = this._polyline(pCons, mapX, powY);
+
+    const nowSX = mapX(nowX);
+
+    const tickCount = 7;
+    const ticks = [];
+    for (let i = 0; i < tickCount; i++) {
+      const t = xMin + ((xMax - xMin) * i) / (tickCount - 1);
+      const d = new Date(t);
+      const label = `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+      ticks.push({ x: mapX(t), label });
+    }
 
     this.innerHTML = `
       <ha-card header="Node Energy">
@@ -180,39 +206,40 @@ class NodeEnergyCard extends HTMLElement {
             <div class="chip wide"><span>Weather Entity</span><b>${meta.weather_entity || "(none)"}</b></div>
           </div>
 
-          <svg viewBox="0 0 ${w} ${hMain}" preserveAspectRatio="none" class="chart">
-            <line x1="${pad}" y1="${hMain - pad}" x2="${w - pad}" y2="${hMain - pad}" class="axis"></line>
-            <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${hMain - pad}" class="axis"></line>
-            <polyline points="${histPts}" class="hist"></polyline>
-            <polyline points="${projWPts}" class="projw"></polyline>
-            <polyline points="${projCPts}" class="projc"></polyline>
-            <line x1="${nowSvgX.toFixed(1)}" y1="${pad}" x2="${nowSvgX.toFixed(1)}" y2="${hMain - pad}" class="now"></line>
-            <text x="${(nowSvgX + 4).toFixed(1)}" y="${(pad + 12).toFixed(1)}" class="txt">Now</text>
-            <text x="8" y="${pad + 2}" class="txt">100%</text>
-            <text x="8" y="${hMain - pad + 4}" class="txt">0%</text>
-          </svg>
+          <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="chart">
+            <line x1="${x0}" y1="${r1Y + r1H}" x2="${x1}" y2="${r1Y + r1H}" class="axis"></line>
+            <line x1="${x0}" y1="${r2Y + r2H}" x2="${x1}" y2="${r2Y + r2H}" class="axis"></line>
+            <line x1="${x0}" y1="${r3Y + r3H}" x2="${x1}" y2="${r3Y + r3H}" class="axis"></line>
+            <line x1="${x0}" y1="${r1Y}" x2="${x0}" y2="${r3Y + r3H}" class="axis"></line>
 
-          <svg viewBox="0 0 ${w} ${hSmall}" preserveAspectRatio="none" class="chart small">
-            <line x1="${pad}" y1="${hSmall - pad}" x2="${w - pad}" y2="${hSmall - pad}" class="axis"></line>
-            <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${hSmall - pad}" class="axis"></line>
-            <polyline points="${histSunPts}" class="sunh"></polyline>
-            <polyline points="${fcSunPts}" class="sunf"></polyline>
-            <line x1="${nowSvgX.toFixed(1)}" y1="${pad}" x2="${nowSvgX.toFixed(1)}" y2="${hSmall - pad}" class="now"></line>
-            <text x="8" y="${pad + 2}" class="txt">${sunYMax.toFixed(0)}°</text>
-            <text x="8" y="${hSmall - pad + 4}" class="txt">${sunYMin.toFixed(0)}°</text>
-          </svg>
+            <polyline points="${socHistPts}" class="hist"></polyline>
+            <polyline points="${socWPts}" class="projw"></polyline>
+            <polyline points="${socCPts}" class="projc"></polyline>
 
-          <svg viewBox="0 0 ${w} ${hSmall}" preserveAspectRatio="none" class="chart small">
-            <line x1="${pad}" y1="${hSmall - pad}" x2="${w - pad}" y2="${hSmall - pad}" class="axis"></line>
-            <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${hSmall - pad}" class="axis"></line>
+            <polyline points="${sunHistPts}" class="sunh"></polyline>
+            <polyline points="${sunFcPts}" class="sunf"></polyline>
+
             <polyline points="${pObsPts}" class="pobs"></polyline>
             <polyline points="${pModelPts}" class="pmodel"></polyline>
             <polyline points="${pProdWPts}" class="pprodw"></polyline>
             <polyline points="${pProdCPts}" class="pprodc"></polyline>
             <polyline points="${pConsPts}" class="pcons"></polyline>
-            <line x1="${nowSvgX.toFixed(1)}" y1="${pad}" x2="${nowSvgX.toFixed(1)}" y2="${hSmall - pad}" class="now"></line>
-            <text x="8" y="${pad + 2}" class="txt">${powYMax.toFixed(2)} W</text>
-            <text x="8" y="${hSmall - pad + 4}" class="txt">${powYMin.toFixed(2)} W</text>
+
+            <line x1="${nowSX.toFixed(1)}" y1="${r1Y}" x2="${nowSX.toFixed(1)}" y2="${r3Y + r3H}" class="now"></line>
+            <text x="${(nowSX + 4).toFixed(1)}" y="${(r1Y + 12).toFixed(1)}" class="txt">Now</text>
+
+            <text x="8" y="${(r1Y + 12).toFixed(1)}" class="txt">SOC</text>
+            <text x="8" y="${(r2Y + 12).toFixed(1)}" class="txt">Sun °</text>
+            <text x="8" y="${(r3Y + 12).toFixed(1)}" class="txt">Power W</text>
+
+            ${ticks
+              .map(
+                (t) => `
+              <line x1="${t.x.toFixed(1)}" y1="${r3Y + r3H}" x2="${t.x.toFixed(1)}" y2="${r3Y + r3H + 6}" class="axis"></line>
+              <text x="${t.x.toFixed(1)}" y="${h - 16}" class="xtick" text-anchor="middle">${t.label}</text>
+            `
+              )
+              .join("")}
           </svg>
 
           <div class="legend">
@@ -239,16 +266,16 @@ class NodeEnergyCard extends HTMLElement {
 
         .chart {
           width: 100%;
-          height: 360px;
+          height: 620px;
           background: var(--card-background-color);
           border: 1px solid var(--divider-color);
           border-radius: 10px;
           margin-top: 8px;
         }
-        .chart.small { height: 210px; }
 
         .axis { stroke: var(--divider-color); stroke-width: 1; }
         .txt { font-size: 11px; fill: var(--secondary-text-color); }
+        .xtick { font-size: 10px; fill: var(--secondary-text-color); }
         .now { stroke: var(--secondary-text-color); stroke-width: 1.2; stroke-dasharray: 4 4; }
 
         .hist { fill: none; stroke: #5f6b7a; stroke-width: 2.4; }
