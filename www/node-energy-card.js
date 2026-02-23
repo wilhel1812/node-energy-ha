@@ -1,4 +1,24 @@
 class NodeEnergyCard extends HTMLElement {
+  static getStubConfig(hass) {
+    const sensorIds = Object.keys((hass && hass.states) || {}).filter((eid) =>
+      eid.startsWith("sensor.")
+    );
+    const preferred =
+      sensorIds.find((eid) => eid.includes("node_energy")) ||
+      sensorIds.find((eid) => eid.includes("wam")) ||
+      sensorIds[0] ||
+      "";
+    return {
+      entity: preferred,
+      cells: 2,
+      days: 7,
+    };
+  }
+
+  static getConfigElement() {
+    return document.createElement("node-energy-card-editor");
+  }
+
   setConfig(config) {
     if (!config.entity) {
       throw new Error("You need to define entity");
@@ -180,7 +200,87 @@ class NodeEnergyCard extends HTMLElement {
   }
 }
 
-customElements.define("node-energy-card", NodeEnergyCard);
+class NodeEnergyCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = {
+      entity: "",
+      cells: 2,
+      days: 7,
+      ...config,
+    };
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  _emitChanged() {
+    this.dispatchEvent(
+      new CustomEvent("config-changed", {
+        detail: { config: this._config },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+    const sensors = Object.keys(this._hass.states || {})
+      .filter((eid) => eid.startsWith("sensor."))
+      .sort();
+
+    this.innerHTML = `
+      <style>
+        .wrap { display: grid; gap: 10px; }
+        .row { display: grid; gap: 4px; }
+        label { font-size: 12px; color: var(--secondary-text-color); }
+        input { padding: 8px; border: 1px solid var(--divider-color); border-radius: 6px; background: var(--card-background-color); color: var(--primary-text-color); }
+      </style>
+      <div class="wrap">
+        <div class="row">
+          <label>Entity</label>
+          <input id="entity" list="node-energy-sensors" value="${this._config.entity || ""}" placeholder="sensor.node_energy..." />
+          <datalist id="node-energy-sensors">
+            ${sensors.map((s) => `<option value="${s}"></option>`).join("")}
+          </datalist>
+        </div>
+        <div class="row">
+          <label>Cells</label>
+          <input id="cells" type="number" min="1" max="12" step="1" value="${Number(this._config.cells || 2)}" />
+        </div>
+        <div class="row">
+          <label>Days</label>
+          <input id="days" type="number" min="1" max="14" step="1" value="${Number(this._config.days || 7)}" />
+        </div>
+      </div>
+    `;
+
+    this.querySelector("#entity")?.addEventListener("change", (ev) => {
+      this._config = { ...this._config, entity: ev.target.value.trim() };
+      this._emitChanged();
+    });
+    this.querySelector("#cells")?.addEventListener("change", (ev) => {
+      const v = Math.max(1, Math.min(12, Number(ev.target.value || 2)));
+      this._config = { ...this._config, cells: v };
+      this._emitChanged();
+    });
+    this.querySelector("#days")?.addEventListener("change", (ev) => {
+      const v = Math.max(1, Math.min(14, Number(ev.target.value || 7)));
+      this._config = { ...this._config, days: v };
+      this._emitChanged();
+    });
+  }
+}
+
+if (!customElements.get("node-energy-card")) {
+  customElements.define("node-energy-card", NodeEnergyCard);
+}
+if (!customElements.get("node-energy-card-editor")) {
+  customElements.define("node-energy-card-editor", NodeEnergyCardEditor);
+}
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "node-energy-card",
