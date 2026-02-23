@@ -119,4 +119,4 @@ Replace `sensor.wam6` with your Node Energy sensor.
 ## Notes
 - Card updates live as HA state updates arrive.
 - ApexCharts handles tooltip/cursor/highlighting natively.
-- `www/node-energy-card.js` remains as legacy fallback; ApexCharts is recommended.
+- This integration is ApexCharts-first; legacy custom card artifacts are removed.
