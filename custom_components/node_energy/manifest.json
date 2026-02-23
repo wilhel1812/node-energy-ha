@@ -1,7 +1,7 @@
 {
   "domain": "node_energy",
   "name": "Node Energy",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "documentation": "https://github.com/wilhel1812/node-energy-ha",
   "issue_tracker": "https://github.com/wilhel1812/node-energy-ha/issues",
   "dependencies": ["recorder"],
