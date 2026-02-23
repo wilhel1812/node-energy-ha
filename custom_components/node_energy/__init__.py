@@ -4,6 +4,7 @@ from pathlib import Path
 
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.panel_custom import async_register_panel
+from homeassistant.config import ConfigType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
@@ -14,7 +15,7 @@ PANEL_COMPONENT = "node-energy-setup-panel"
 PANEL_URL_PATH = "node-energy-setup"
 PANEL_STATIC_DIR_URL = "/api/node_energy_panel"
 PANEL_MODULE = "node-energy-setup-panel.js"
-PANEL_MODULE_VERSION = "0.1.5"
+PANEL_MODULE_VERSION = "0.1.6"
 DATA_PANEL_REGISTERED = f"{DOMAIN}_panel_registered"
 
 
@@ -38,12 +39,18 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     hass.data[DATA_PANEL_REGISTERED] = True
 
 
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the Node Energy component and register global UI panel."""
+    await _async_register_panel(hass)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    await _async_register_panel(hass)
     coordinator = NodeEnergyCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    await _async_register_panel(hass)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
