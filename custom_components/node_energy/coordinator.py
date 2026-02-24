@@ -64,6 +64,22 @@ def _parse_float(v: Any) -> float | None:
         return None
 
 
+def _quantile(xs: list[float], q: float) -> float:
+    if not xs:
+        return 0.0
+    ys = sorted(float(v) for v in xs)
+    if len(ys) == 1:
+        return ys[0]
+    q = max(0.0, min(1.0, float(q)))
+    pos = q * (len(ys) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return ys[lo]
+    k = pos - lo
+    return ys[lo] * (1.0 - k) + ys[hi] * k
+
+
 def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple[float, float]:
     if not intervals or cap_wh <= 0:
         return 0.0, 0.0
@@ -97,6 +113,59 @@ def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple
     else:
         solar_peak_w = max(0.0, _mean(y) + load_w)
     return load_w, solar_peak_w
+
+
+def _build_weather_climatology_by_hour(
+    intervals: list[dict[str, Any]],
+    load_w: float,
+    solar_peak_w_raw: float,
+    q: float = 0.35,
+) -> tuple[list[float], float]:
+    buckets: list[list[float]] = [[] for _ in range(24)]
+    all_vals: list[float] = []
+
+    for it in intervals:
+        sproxy = float(it.get("sun_proxy", 0.0))
+        if sproxy <= 0.01:
+            continue
+        tm = dt_util.parse_datetime(str(it.get("tm", "")))
+        if tm is None:
+            continue
+        dt_h = float(it.get("dt_h", 0.0))
+        dsoc = float(it.get("dsoc", 0.0))
+        if dt_h <= 0:
+            continue
+        p_obs = float(it.get("net_power_obs_w", 0.0))
+        if not math.isfinite(p_obs):
+            p_obs = 0.0
+        obs_prod = max(0.0, p_obs + load_w)
+        clear_prod = max(1e-6, solar_peak_w_raw * sproxy)
+        wf_emp = max(0.05, min(1.0, obs_prod / clear_prod))
+        h = tm.astimezone(dt_util.DEFAULT_TIME_ZONE).hour
+        buckets[h].append(wf_emp)
+        all_vals.append(wf_emp)
+
+    # Fallback to historic weather factors if production-derived values are too sparse.
+    if len(all_vals) < 6:
+        for it in intervals:
+            sproxy = float(it.get("sun_proxy", 0.0))
+            if sproxy <= 0.01:
+                continue
+            tm = dt_util.parse_datetime(str(it.get("tm", "")))
+            if tm is None:
+                continue
+            wf = float(it.get("weather_factor_hist", 1.0))
+            wf = max(0.05, min(1.0, wf))
+            h = tm.astimezone(dt_util.DEFAULT_TIME_ZONE).hour
+            buckets[h].append(wf)
+            all_vals.append(wf)
+
+    global_q = max(0.05, min(1.0, _quantile(all_vals, q))) if all_vals else 0.60
+    hourly = [global_q for _ in range(24)]
+    for h in range(24):
+        if buckets[h]:
+            hourly[h] = max(0.05, min(1.0, _quantile(buckets[h], q)))
+    return hourly, global_q
 
 
 def _compute_backtest_24h(intervals: list[dict[str, Any]], cap_wh: float) -> dict[str, float | int] | None:
@@ -516,12 +585,19 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not intervals:
             raise UpdateFailed("No valid intervals")
 
-        load_w, solar_peak_w = _fit_load_and_solar(intervals, cap_wh_current)
+        load_w, solar_peak_w_raw = _fit_load_and_solar(intervals, cap_wh_current)
         backtest_24h = _compute_backtest_24h(intervals, cap_wh_current)
         solar_scale_24h = 1.0
         if backtest_24h and int(backtest_24h.get("daylight_samples_test", 0)) >= 3:
             solar_scale_24h = max(0.25, min(1.25, float(backtest_24h.get("solar_scale_raw", 1.0))))
-            solar_peak_w *= solar_scale_24h
+        solar_peak_w = solar_peak_w_raw * solar_scale_24h
+        fallback_quantile = 0.35
+        wf_climatology_hourly, wf_climatology_global = _build_weather_climatology_by_hour(
+            intervals,
+            load_w,
+            solar_peak_w_raw,
+            fallback_quantile,
+        )
 
         for it in intervals:
             p_clear = solar_peak_w * it["sun_proxy"]
@@ -543,6 +619,19 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             [*weather_hist_points, *weather_forecast_points],
             key=lambda p: p.get("ts") or datetime.min.replace(tzinfo=UTC),
         )
+        provider_forecast_end = weather_forecast_points[-1]["ts"] if weather_forecast_points else None
+
+        def _weather_factor_for_future(ts: datetime) -> float:
+            fac_provider, _ = _weather_factor_at(weather_all, ts)
+            fac_provider = max(0.05, min(1.0, float(fac_provider)))
+            if provider_forecast_end and ts > provider_forecast_end:
+                h = ts.astimezone(dt_util.DEFAULT_TIME_ZONE).hour
+                fac_clim = wf_climatology_hourly[h] if 0 <= h < 24 else wf_climatology_global
+                hrs = (ts - provider_forecast_end).total_seconds() / 3600.0
+                # Smooth transition from provider profile to conservative climatology.
+                alpha = math.exp(-max(0.0, hrs) / 12.0)
+                return max(0.05, min(1.0, alpha * fac_provider + (1.0 - alpha) * fac_clim))
+            return fac_provider
 
         def _simulate_soc_between(start_ts: datetime, end_ts: datetime, start_soc: float, use_weather: bool) -> float:
             if end_ts <= start_ts:
@@ -556,7 +645,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 mid = t + (t_next - t) / 2
                 elev, _ = _solar_position_utc(mid, lat, lon)
                 sproxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
-                wf, _ = _weather_factor_at(weather_all, mid)
+                wf = _weather_factor_for_future(mid)
                 p_prod = solar_peak_w * sproxy * (wf if use_weather else 1.0)
                 p_net = -load_w + p_prod
                 soc += (p_net * dt_h / cap_wh) * 100.0
@@ -575,7 +664,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             t = now_utc + timedelta(minutes=i * step_min)
             elev, _ = _solar_position_utc(t, lat, lon)
             sproxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
-            wf, _ = _weather_factor_at(weather_all, t)
+            wf = _weather_factor_for_future(t)
             times.append(t.isoformat())
             solar_proxy.append(sproxy)
             solar_elev.append(elev)
@@ -698,9 +787,17 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ATTR_MODEL: {
                 "load_w": load_w,
                 "solar_peak_w": solar_peak_w,
+                "solar_peak_w_raw": solar_peak_w_raw,
                 "avg_net_w_observed": _mean([float(it.get("net_power_obs_w", 0.0)) for it in intervals]),
                 "current_production_weather_w": current_prod_weather_w,
                 "solar_scale_24h": solar_scale_24h,
+                "weather_fallback_method": "climatology_p35_blend12h",
+                "weather_fallback_quantile": fallback_quantile,
+                "weather_provider_horizon_hours": (
+                    round((provider_forecast_end - now_utc).total_seconds() / 3600.0, 2)
+                    if provider_forecast_end
+                    else None
+                ),
                 "backtest_24h_mae_soc": (round(float(backtest_24h["mae_soc"]), 3) if backtest_24h else None),
                 "backtest_24h_bias_soc": (round(float(backtest_24h["bias_soc"]), 3) if backtest_24h else None),
                 "backtest_24h_rmse_soc": (round(float(backtest_24h["rmse_soc"]), 3) if backtest_24h else None),
