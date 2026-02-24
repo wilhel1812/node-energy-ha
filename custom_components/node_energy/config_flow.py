@@ -46,57 +46,44 @@ def _default_analysis_start(defaults: dict[str, Any]) -> str | None:
 
 def _schema(defaults: dict[str, Any]) -> vol.Schema:
     analysis_start_default = _default_analysis_start(defaults) or ""
-    return vol.Schema(
-        {
-            vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, DEFAULT_NAME)): str,
-            vol.Required(
-                CONF_BATTERY_ENTITY,
-                default=defaults.get(CONF_BATTERY_ENTITY, ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain=["sensor"])
-            ),
-            vol.Optional(
-                CONF_VOLTAGE_ENTITY,
-                default=defaults.get(CONF_VOLTAGE_ENTITY, ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain=["sensor"])
-            ),
-            vol.Optional(
-                CONF_WEATHER_ENTITY,
-                default=defaults.get(CONF_WEATHER_ENTITY, ""),
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain=["weather"])
-            ),
-            vol.Optional(
-                CONF_ANALYSIS_START,
-                default=analysis_start_default,
-            ): str,
-            vol.Required(
-                CONF_CELLS_CURRENT,
-                default=defaults.get(CONF_CELLS_CURRENT, DEFAULT_CELLS_CURRENT),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=1, max=12, step=1, mode=selector.NumberSelectorMode.BOX)
-            ),
-            vol.Required(
-                CONF_CELL_MAH,
-                default=defaults.get(CONF_CELL_MAH, DEFAULT_CELL_MAH),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=200, max=10000, step=50, mode=selector.NumberSelectorMode.BOX)
-            ),
-            vol.Required(
-                CONF_CELL_V,
-                default=defaults.get(CONF_CELL_V, DEFAULT_CELL_V),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=2.5, max=4.2, step=0.05, mode=selector.NumberSelectorMode.BOX)
-            ),
-            vol.Required(
-                CONF_HORIZON_DAYS,
-                default=defaults.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=1, max=14, step=1, mode=selector.NumberSelectorMode.BOX)
-            ),
-        }
+    fields: dict[Any, Any] = {}
+    fields[vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, DEFAULT_NAME))] = str
+
+    battery_default = defaults.get(CONF_BATTERY_ENTITY)
+    if isinstance(battery_default, str) and battery_default:
+        battery_key = vol.Required(CONF_BATTERY_ENTITY, default=battery_default)
+    else:
+        battery_key = vol.Required(CONF_BATTERY_ENTITY)
+    fields[battery_key] = selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor"]))
+
+    voltage_default = defaults.get(CONF_VOLTAGE_ENTITY)
+    if isinstance(voltage_default, str) and voltage_default:
+        voltage_key = vol.Optional(CONF_VOLTAGE_ENTITY, default=voltage_default)
+    else:
+        voltage_key = vol.Optional(CONF_VOLTAGE_ENTITY)
+    fields[voltage_key] = selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor"]))
+
+    weather_default = defaults.get(CONF_WEATHER_ENTITY)
+    if isinstance(weather_default, str) and weather_default:
+        weather_key = vol.Optional(CONF_WEATHER_ENTITY, default=weather_default)
+    else:
+        weather_key = vol.Optional(CONF_WEATHER_ENTITY)
+    fields[weather_key] = selector.EntitySelector(selector.EntitySelectorConfig(domain=["weather"]))
+
+    fields[vol.Optional(CONF_ANALYSIS_START, default=analysis_start_default)] = str
+    fields[vol.Required(CONF_CELLS_CURRENT, default=defaults.get(CONF_CELLS_CURRENT, DEFAULT_CELLS_CURRENT))] = selector.NumberSelector(
+        selector.NumberSelectorConfig(min=1, max=12, step=1, mode=selector.NumberSelectorMode.BOX)
     )
+    fields[vol.Required(CONF_CELL_MAH, default=defaults.get(CONF_CELL_MAH, DEFAULT_CELL_MAH))] = selector.NumberSelector(
+        selector.NumberSelectorConfig(min=200, max=10000, step=50, mode=selector.NumberSelectorMode.BOX)
+    )
+    fields[vol.Required(CONF_CELL_V, default=defaults.get(CONF_CELL_V, DEFAULT_CELL_V))] = selector.NumberSelector(
+        selector.NumberSelectorConfig(min=2.5, max=4.2, step=0.05, mode=selector.NumberSelectorMode.BOX)
+    )
+    fields[vol.Required(CONF_HORIZON_DAYS, default=defaults.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS))] = selector.NumberSelector(
+        selector.NumberSelectorConfig(min=1, max=14, step=1, mode=selector.NumberSelectorMode.BOX)
+    )
+    return vol.Schema(fields)
 
 
 class NodeEnergyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
