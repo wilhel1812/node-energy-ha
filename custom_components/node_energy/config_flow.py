@@ -70,7 +70,7 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_ANALYSIS_START,
                 default=analysis_start_default,
-            ): selector.DateTimeSelector(),
+            ): str,
             vol.Required(
                 CONF_CELLS_CURRENT,
                 default=defaults.get(CONF_CELLS_CURRENT, DEFAULT_CELLS_CURRENT),
