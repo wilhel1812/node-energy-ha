@@ -8,7 +8,8 @@ from .coordinator import NodeEnergyCoordinator
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = NodeEnergyCoordinator(hass, entry)
-    await coordinator.async_config_entry_first_refresh()
+    # Keep entry load resilient even if recorder/weather is not ready yet.
+    await coordinator.async_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
@@ -37,12 +38,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-        if not hass.data[DOMAIN] and hass.services.has_service(DOMAIN, "refresh"):
+        domain_data = hass.data.get(DOMAIN)
+        if isinstance(domain_data, dict):
+            domain_data.pop(entry.entry_id, None)
+        if isinstance(domain_data, dict) and (not domain_data) and hass.services.has_service(DOMAIN, "refresh"):
             hass.services.async_remove(DOMAIN, "refresh")
     return unload_ok
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
+    unload_ok = await async_unload_entry(hass, entry)
+    if unload_ok:
+        await async_setup_entry(hass, entry)
