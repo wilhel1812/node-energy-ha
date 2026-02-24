@@ -11,7 +11,13 @@ from .const import ATTR_APEX_SERIES, ATTR_FORECAST, ATTR_HISTORY_SOC, ATTR_HISTO
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([NodeEnergySensor(coordinator, entry)], True)
+    async_add_entities(
+        [
+            NodeEnergySensor(coordinator, entry),
+            NodeEnergyNoSunRuntimeSensor(coordinator, entry),
+        ],
+        True,
+    )
 
 
 class NodeEnergySensor(CoordinatorEntity, SensorEntity):
@@ -43,3 +49,21 @@ class NodeEnergySensor(CoordinatorEntity, SensorEntity):
             ATTR_FORECAST: d.get(ATTR_FORECAST),
             ATTR_APEX_SERIES: d.get(ATTR_APEX_SERIES),
         }
+
+
+class NodeEnergyNoSunRuntimeSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "d"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_no_sun_runtime_days"
+        self._attr_name = f"{entry.title} No-sun runtime"
+        self._attr_icon = "mdi:weather-night"
+
+    @property
+    def native_value(self):
+        v = (self.coordinator.data or {}).get("no_sun_runtime_days")
+        return round(float(v), 2) if v is not None else None

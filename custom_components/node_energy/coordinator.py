@@ -509,6 +509,18 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc_actual = [{"x": s.ts.isoformat(), "y": s.value} for s in batt_rows]
         soc_projection_weather = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios"].get(str(cells_current), []), strict=False)]
         soc_projection_clear = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios_clear"].get(str(cells_current), []), strict=False)]
+        cap_wh_runtime = cells_current * (cell_mah / 1000.0) * cell_v
+        soc_projection_no_sun: list[dict[str, Any]] = []
+        soc_no_sun = float(soc_now)
+        dt_h_step = step_min / 60.0
+        for t in times:
+            soc_projection_no_sun.append({"x": t, "y": soc_no_sun})
+            if cap_wh_runtime > 0:
+                soc_no_sun += ((-load_w) * dt_h_step / cap_wh_runtime) * 100.0
+                soc_no_sun = max(0.0, min(100.0, soc_no_sun))
+
+        remain_wh_no_sun = max(0.0, min(100.0, soc_now)) / 100.0 * cap_wh_runtime
+        no_sun_runtime_days = (remain_wh_no_sun / load_w / 24.0) if load_w > 0 else None
         sun_history: list[dict[str, Any]] = []
         for it in intervals:
             tm = dt_util.parse_datetime(it["tm"])
@@ -534,6 +546,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "soc_actual": soc_actual,
             "soc_projection_weather": soc_projection_weather,
             "soc_projection_clear": soc_projection_clear,
+            "soc_projection_no_sun": soc_projection_no_sun,
             "sun_history": sun_history,
             "sun_forecast": sun_forecast,
             "power_observed": power_observed,
@@ -577,6 +590,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ATTR_INTERVALS: intervals,
             ATTR_FORECAST: forecast,
             ATTR_APEX_SERIES: apex_series,
+            "no_sun_runtime_days": round(no_sun_runtime_days, 3) if no_sun_runtime_days is not None else None,
             "native_value": round(latest_soc, 2),
         }
 
