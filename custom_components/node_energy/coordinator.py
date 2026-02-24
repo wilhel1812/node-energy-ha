@@ -428,19 +428,49 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         latest_soc = batt_rows[-1].value
         latest_ts = batt_rows[-1].ts
+        now_utc = dt_util.utcnow().astimezone(UTC)
 
         step_min = 10
+        step_delta = timedelta(minutes=step_min)
         steps = int((max(1, min(14, horizon_days)) * 24 * 60) / step_min)
+
+        weather_all = sorted(
+            [*weather_hist_points, *weather_forecast_points],
+            key=lambda p: p.get("ts") or datetime.min.replace(tzinfo=UTC),
+        )
+
+        def _simulate_soc_between(start_ts: datetime, end_ts: datetime, start_soc: float, use_weather: bool) -> float:
+            if end_ts <= start_ts:
+                return start_soc
+            cap_wh = cells_current * (cell_mah / 1000.0) * cell_v
+            soc = float(start_soc)
+            t = start_ts
+            while t < end_ts:
+                t_next = min(t + step_delta, end_ts)
+                dt_h = (t_next - t).total_seconds() / 3600.0
+                mid = t + (t_next - t) / 2
+                elev, _ = _solar_position_utc(mid, lat, lon)
+                sproxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
+                wf, _ = _weather_factor_at(weather_all, mid)
+                p_prod = solar_peak_w * sproxy * (wf if use_weather else 1.0)
+                p_net = -load_w + p_prod
+                soc += (p_net * dt_h / cap_wh) * 100.0
+                soc = max(0.0, min(100.0, soc))
+                t = t_next
+            return soc
+
+        soc_now = _simulate_soc_between(latest_ts, now_utc, latest_soc, True)
+
         times: list[str] = []
         solar_proxy: list[float] = []
         solar_elev: list[float] = []
         weather_factor: list[float] = []
 
         for i in range(steps + 1):
-            t = latest_ts + timedelta(minutes=i * step_min)
+            t = now_utc + timedelta(minutes=i * step_min)
             elev, _ = _solar_position_utc(t, lat, lon)
             sproxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
-            wf, _ = _weather_factor_at(weather_forecast_points, t)
+            wf, _ = _weather_factor_at(weather_all, t)
             times.append(t.isoformat())
             solar_proxy.append(sproxy)
             solar_elev.append(elev)
@@ -448,7 +478,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         def simulate(cells: int, use_weather: bool) -> list[float]:
             cap_wh = cells * (cell_mah / 1000.0) * cell_v
-            soc = float(latest_soc)
+            soc = float(soc_now)
             out = [soc]
             dt_h = step_min / 60.0
             for i in range(1, len(times)):
@@ -475,7 +505,19 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc_actual = [{"x": s.ts.isoformat(), "y": s.value} for s in batt_rows]
         soc_projection_weather = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios"].get(str(cells_current), []), strict=False)]
         soc_projection_clear = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios_clear"].get(str(cells_current), []), strict=False)]
-        sun_history = [{"x": it["tm"], "y": it["sun_elev_deg"]} for it in intervals]
+        sun_history: list[dict[str, Any]] = []
+        for it in intervals:
+            tm = dt_util.parse_datetime(it["tm"])
+            if tm and tm < now_utc:
+                sun_history.append({"x": it["tm"], "y": it["sun_elev_deg"]})
+
+        last_sun_hist_ts = dt_util.parse_datetime(sun_history[-1]["x"]) if sun_history else None
+        if last_sun_hist_ts is None or last_sun_hist_ts < now_utc:
+            t_hist = (latest_ts if latest_ts > start_utc else start_utc)
+            while t_hist < now_utc:
+                elev, _ = _solar_position_utc(t_hist, lat, lon)
+                sun_history.append({"x": t_hist.isoformat(), "y": elev})
+                t_hist += step_delta
         sun_forecast = [{"x": t, "y": e} for t, e in zip(times, solar_elev, strict=False)]
         power_observed = [{"x": it["tm"], "y": it["net_power_obs_w"]} for it in intervals]
         power_modeled = [{"x": it["tm"], "y": it["net_power_model_w"]} for it in intervals]
@@ -484,7 +526,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         power_consumption = [{"x": it["tm"], "y": it["consumption_w"]} for it in intervals]
 
         apex_series = {
-            "now": latest_ts.isoformat(),
+            "now": now_utc.isoformat(),
             "soc_actual": soc_actual,
             "soc_projection_weather": soc_projection_weather,
             "soc_projection_clear": soc_projection_clear,
@@ -510,6 +552,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "cell_v": cell_v,
                 "horizon_days": horizon_days,
                 "latest_local": latest_ts.astimezone(dt_util.DEFAULT_TIME_ZONE).isoformat(),
+                "now_local": now_utc.astimezone(dt_util.DEFAULT_TIME_ZONE).isoformat(),
             },
             ATTR_MODEL: {
                 "load_w": load_w,
