@@ -19,6 +19,7 @@ from .const import (
     ATTR_INTERVALS,
     ATTR_META,
     ATTR_MODEL,
+    CONF_ANALYSIS_START,
     CONF_BATTERY_ENTITY,
     CONF_CELL_MAH,
     CONF_CELL_V,
@@ -328,18 +329,21 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         horizon_days = int(cfg.get(CONF_HORIZON_DAYS, DEFAULT_HORIZON_DAYS))
 
         now_local = dt_util.now()
-        if start_date:
+        start_local: datetime
+        analysis_start = cfg.get(CONF_ANALYSIS_START)
+        if analysis_start:
+            parsed_dt = dt_util.parse_datetime(str(analysis_start))
+            if parsed_dt is not None:
+                if parsed_dt.tzinfo is None:
+                    start_local = parsed_dt.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+                else:
+                    start_local = parsed_dt.astimezone(dt_util.DEFAULT_TIME_ZONE)
+            else:
+                start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        elif start_date:
             parsed_date = dt_util.parse_date(str(start_date))
             if parsed_date:
-                start_local = datetime(
-                    parsed_date.year,
-                    parsed_date.month,
-                    parsed_date.day,
-                    start_hour,
-                    0,
-                    0,
-                    tzinfo=dt_util.DEFAULT_TIME_ZONE,
-                )
+                start_local = datetime(parsed_date.year, parsed_date.month, parsed_date.day, start_hour, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE)
             else:
                 start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
         else:
