@@ -45,7 +45,7 @@ def _default_analysis_start(defaults: dict[str, Any]) -> str | None:
 
 
 def _schema(defaults: dict[str, Any]) -> vol.Schema:
-    analysis_start_default = _default_analysis_start(defaults)
+    analysis_start_default = _default_analysis_start(defaults) or ""
     return vol.Schema(
         {
             vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, DEFAULT_NAME)): str,
