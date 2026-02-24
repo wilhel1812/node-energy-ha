@@ -80,6 +80,10 @@ def _quantile(xs: list[float], q: float) -> float:
     return ys[lo] * (1.0 - k) + ys[hi] * k
 
 
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
 def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple[float, float]:
     if not intervals or cap_wh <= 0:
         return 0.0, 0.0
@@ -115,12 +119,13 @@ def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple
     return load_w, solar_peak_w
 
 
-def _build_weather_climatology_by_hour(
+def _build_empirical_weather_quantiles_by_hour(
     intervals: list[dict[str, Any]],
     load_w: float,
     solar_peak_w_raw: float,
-    q: float = 0.35,
-) -> tuple[list[float], float]:
+    q_low: float = 0.2,
+    q_mid: float = 0.5,
+) -> dict[str, Any]:
     buckets: list[list[float]] = [[] for _ in range(24)]
     all_vals: list[float] = []
 
@@ -160,12 +165,42 @@ def _build_weather_climatology_by_hour(
             buckets[h].append(wf)
             all_vals.append(wf)
 
-    global_q = max(0.05, min(1.0, _quantile(all_vals, q))) if all_vals else 0.60
-    hourly = [global_q for _ in range(24)]
+    g_low = _clamp(_quantile(all_vals, q_low), 0.05, 1.0) if all_vals else 0.45
+    g_mid = _clamp(_quantile(all_vals, q_mid), 0.05, 1.0) if all_vals else 0.65
+    h_low = [g_low for _ in range(24)]
+    h_mid = [g_mid for _ in range(24)]
     for h in range(24):
         if buckets[h]:
-            hourly[h] = max(0.05, min(1.0, _quantile(buckets[h], q)))
-    return hourly, global_q
+            h_low[h] = _clamp(_quantile(buckets[h], q_low), 0.05, 1.0)
+            h_mid[h] = _clamp(_quantile(buckets[h], q_mid), 0.05, 1.0)
+    return {
+        "hourly_p20": h_low,
+        "hourly_p50": h_mid,
+        "global_p20": g_low,
+        "global_p50": g_mid,
+        "samples": len(all_vals),
+    }
+
+
+def _weather_factor_interpolated(points: list[dict[str, Any]], ts: datetime) -> float | None:
+    if not points:
+        return None
+    if ts < points[0]["ts"] or ts > points[-1]["ts"]:
+        return None
+    if ts == points[0]["ts"]:
+        return float(points[0]["factor"])
+    if ts == points[-1]["ts"]:
+        return float(points[-1]["factor"])
+    for i in range(1, len(points)):
+        a = points[i - 1]
+        b = points[i]
+        if a["ts"] <= ts <= b["ts"]:
+            span = (b["ts"] - a["ts"]).total_seconds()
+            if span <= 0:
+                return float(a["factor"])
+            k = (ts - a["ts"]).total_seconds() / span
+            return float(a["factor"]) + (float(b["factor"]) - float(a["factor"])) * k
+    return None
 
 
 def _compute_backtest_24h(intervals: list[dict[str, Any]], cap_wh: float) -> dict[str, float | int] | None:
@@ -587,16 +622,20 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         load_w, solar_peak_w_raw = _fit_load_and_solar(intervals, cap_wh_current)
         backtest_24h = _compute_backtest_24h(intervals, cap_wh_current)
-        solar_scale_24h = 1.0
+        solar_scale_24h_raw = 1.0
         if backtest_24h and int(backtest_24h.get("daylight_samples_test", 0)) >= 3:
-            solar_scale_24h = max(0.25, min(1.25, float(backtest_24h.get("solar_scale_raw", 1.0))))
+            solar_scale_24h_raw = _clamp(float(backtest_24h.get("solar_scale_raw", 1.0)), 0.5, 1.5)
+        bt_conf = 0.0
+        if backtest_24h:
+            bt_conf = _clamp(int(backtest_24h.get("daylight_samples_test", 0)) / 12.0, 0.0, 1.0)
+        solar_scale_24h = 1.0 + (solar_scale_24h_raw - 1.0) * bt_conf
+        solar_scale_24h = _clamp(solar_scale_24h, 0.5, 1.5)
         solar_peak_w = solar_peak_w_raw * solar_scale_24h
-        fallback_quantile = 0.35
-        wf_climatology_hourly, wf_climatology_global = _build_weather_climatology_by_hour(
+
+        empirical = _build_empirical_weather_quantiles_by_hour(
             intervals,
             load_w,
             solar_peak_w_raw,
-            fallback_quantile,
         )
 
         for it in intervals:
@@ -620,18 +659,41 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             key=lambda p: p.get("ts") or datetime.min.replace(tzinfo=UTC),
         )
         provider_forecast_end = weather_forecast_points[-1]["ts"] if weather_forecast_points else None
+        provider_forecast_start = weather_forecast_points[0]["ts"] if weather_forecast_points else None
 
-        def _weather_factor_for_future(ts: datetime) -> float:
-            fac_provider, _ = _weather_factor_at(weather_all, ts)
-            fac_provider = max(0.05, min(1.0, float(fac_provider)))
+        emp_samples = int(empirical.get("samples", 0))
+        emp_conf = _clamp(emp_samples / 36.0, 0.0, 1.0)
+
+        def _weather_factors_for_future(ts: datetime) -> tuple[float, float]:
+            h = ts.astimezone(dt_util.DEFAULT_TIME_ZONE).hour
+            e50 = empirical["hourly_p50"][h] if 0 <= h < 24 else empirical["global_p50"]
+            e20 = empirical["hourly_p20"][h] if 0 <= h < 24 else empirical["global_p20"]
+
+            p = _weather_factor_interpolated(weather_forecast_points, ts)
+            if p is None and provider_forecast_start and ts < provider_forecast_start:
+                p = float(weather_forecast_points[0]["factor"])
+
+            if p is None:
+                # No provider point at this timestamp: use empirical directly.
+                return _clamp(e50, 0.05, 1.0), _clamp(min(e20, e50), 0.05, 1.0)
+
+            p = _clamp(float(p), 0.05, 1.0)
             if provider_forecast_end and ts > provider_forecast_end:
-                h = ts.astimezone(dt_util.DEFAULT_TIME_ZONE).hour
-                fac_clim = wf_climatology_hourly[h] if 0 <= h < 24 else wf_climatology_global
                 hrs = (ts - provider_forecast_end).total_seconds() / 3600.0
-                # Smooth transition from provider profile to conservative climatology.
+                # fade provider to empirical after forecast horizon
                 alpha = math.exp(-max(0.0, hrs) / 12.0)
-                return max(0.05, min(1.0, alpha * fac_provider + (1.0 - alpha) * fac_clim))
-            return fac_provider
+                provider_w = alpha
+            else:
+                provider_w = 1.0
+
+            # Even inside provider horizon, blend with empirical to avoid systemic bias.
+            # Empirical influence increases with sample count.
+            emp_w_base = 0.15 + 0.35 * emp_conf
+            provider_w *= (1.0 - emp_w_base)
+            empirical_w = 1.0 - provider_w
+            f50 = _clamp(provider_w * p + empirical_w * e50, 0.05, 1.0)
+            f20 = _clamp(provider_w * p + empirical_w * e20, 0.05, 1.0)
+            return f50, min(f20, f50)
 
         def _simulate_soc_between(start_ts: datetime, end_ts: datetime, start_soc: float, use_weather: bool) -> float:
             if end_ts <= start_ts:
@@ -659,24 +721,26 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar_proxy: list[float] = []
         solar_elev: list[float] = []
         weather_factor: list[float] = []
+        weather_factor_p20: list[float] = []
 
         for i in range(steps + 1):
             t = now_utc + timedelta(minutes=i * step_min)
             elev, _ = _solar_position_utc(t, lat, lon)
             sproxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
-            wf = _weather_factor_for_future(t)
+            wf50, wf20 = _weather_factors_for_future(t)
             times.append(t.isoformat())
             solar_proxy.append(sproxy)
             solar_elev.append(elev)
-            weather_factor.append(wf)
+            weather_factor.append(wf50)
+            weather_factor_p20.append(wf20)
 
-        def simulate(cells: int, use_weather: bool) -> list[float]:
+        def simulate(cells: int, use_weather: bool, weather_arr: list[float] | None = None) -> list[float]:
             cap_wh = cells * (cell_mah / 1000.0) * cell_v
             soc = float(soc_now)
             out = [soc]
             dt_h = step_min / 60.0
             for i in range(1, len(times)):
-                wf = weather_factor[i] if use_weather else 1.0
+                wf = weather_arr[i] if (use_weather and weather_arr is not None) else (weather_factor[i] if use_weather else 1.0)
                 p_prod = solar_peak_w * solar_proxy[i] * wf
                 p_net = -load_w + p_prod
                 soc += (p_net * dt_h / cap_wh) * 100.0
@@ -691,13 +755,16 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "solar_proxy": solar_proxy,
             "solar_elev": solar_elev,
             "weather_factor": weather_factor,
+            "weather_factor_p20": weather_factor_p20,
             "latest_soc": latest_soc,
             "scenarios": {str(c): simulate(c, True) for c in scenario_cells},
+            "scenarios_p20": {str(c): simulate(c, True, weather_factor_p20) for c in scenario_cells},
             "scenarios_clear": {str(c): simulate(c, False) for c in scenario_cells},
         }
 
         soc_actual = [{"x": s.ts.isoformat(), "y": s.value} for s in batt_rows]
         soc_projection_weather = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios"].get(str(cells_current), []), strict=False)]
+        soc_projection_weather_p20 = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios_p20"].get(str(cells_current), []), strict=False)]
         soc_projection_clear = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios_clear"].get(str(cells_current), []), strict=False)]
         cap_wh_runtime = cells_current * (cell_mah / 1000.0) * cell_v
         soc_projection_no_sun: list[dict[str, Any]] = []
@@ -758,6 +825,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "now": now_utc.isoformat(),
             "soc_actual": soc_actual,
             "soc_projection_weather": soc_projection_weather,
+            "soc_projection_weather_p20": soc_projection_weather_p20,
             "soc_projection_clear": soc_projection_clear,
             "soc_projection_no_sun": soc_projection_no_sun,
             "sun_history": sun_history,
@@ -791,8 +859,13 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "avg_net_w_observed": _mean([float(it.get("net_power_obs_w", 0.0)) for it in intervals]),
                 "current_production_weather_w": current_prod_weather_w,
                 "solar_scale_24h": solar_scale_24h,
-                "weather_fallback_method": "climatology_p35_blend12h",
-                "weather_fallback_quantile": fallback_quantile,
+                "solar_scale_24h_raw": solar_scale_24h_raw,
+                "calibration_confidence": bt_conf,
+                "weather_fallback_method": "empirical_quantile_blend",
+                "weather_fallback_quantile_p20": 0.2,
+                "weather_fallback_quantile_p50": 0.5,
+                "weather_empirical_samples": emp_samples,
+                "weather_empirical_confidence": emp_conf,
                 "weather_provider_horizon_hours": (
                     round((provider_forecast_end - now_utc).total_seconds() / 3600.0, 2)
                     if provider_forecast_end
