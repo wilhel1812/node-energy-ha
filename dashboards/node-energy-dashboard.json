@@ -123,7 +123,6 @@
                   "entity": "sensor.node_energy",
                   "name": "Sun elevation (forecast)",
                   "yaxis_id": "sun",
-                  "stroke_dash": 6,
                   "data_generator": "return (entity.attributes.apex_series?.sun_forecast || []).map(p => [new Date(p.x).getTime(), p.y]);"
                 }
               ]

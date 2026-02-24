@@ -64,6 +64,112 @@ def _parse_float(v: Any) -> float | None:
         return None
 
 
+def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple[float, float]:
+    if not intervals or cap_wh <= 0:
+        return 0.0, 0.0
+
+    x: list[float] = []
+    y: list[float] = []
+    for it in intervals:
+        dt_h = float(it.get("dt_h", 0.0))
+        dsoc = float(it.get("dsoc", 0.0))
+        if dt_h <= 0:
+            continue
+        sx = float(it.get("sun_proxy", 0.0)) * float(it.get("weather_factor_hist", 1.0))
+        p_obs = cap_wh * (dsoc / 100.0) / dt_h
+        x.append(sx)
+        y.append(p_obs)
+
+    if not y:
+        return 0.0, 0.0
+
+    night_obs = [p for p, sx in zip(y, x, strict=False) if sx <= 0.01]
+    if night_obs:
+        load_w = max(0.0, -_mean(night_obs))
+    else:
+        load_w = max(0.0, -_mean(y))
+
+    day_xy = [(sx, p + load_w) for p, sx in zip(y, x, strict=False) if sx > 0.01]
+    if day_xy:
+        num = sum(sx * yp for sx, yp in day_xy)
+        den = sum(sx * sx for sx, _ in day_xy)
+        solar_peak_w = max(0.0, num / den) if den > 0 else 0.0
+    else:
+        solar_peak_w = max(0.0, _mean(y) + load_w)
+    return load_w, solar_peak_w
+
+
+def _compute_backtest_24h(intervals: list[dict[str, Any]], cap_wh: float) -> dict[str, float | int] | None:
+    if len(intervals) < 10 or cap_wh <= 0:
+        return None
+
+    def _tm(it: dict[str, Any]) -> datetime | None:
+        return dt_util.parse_datetime(str(it.get("tm", "")))
+
+    enriched: list[dict[str, Any]] = []
+    for it in intervals:
+        tm = _tm(it)
+        if tm is None:
+            continue
+        e = dict(it)
+        e["_tm"] = tm
+        enriched.append(e)
+    if len(enriched) < 10:
+        return None
+    enriched.sort(key=lambda it: it["_tm"])
+
+    latest_tm = enriched[-1]["_tm"]
+    anchor = latest_tm - timedelta(hours=24)
+    train = [it for it in enriched if it["_tm"] <= anchor]
+    test = [it for it in enriched if it["_tm"] > anchor]
+    if len(train) < 6 or len(test) < 4:
+        return None
+
+    load_train, solar_train = _fit_load_and_solar(train, cap_wh)
+    soc = float(test[0].get("soc0", 0.0))
+    errs: list[float] = []
+    obs_day_e = 0.0
+    pred_day_e = 0.0
+    day_count = 0
+
+    for it in test:
+        dt_h = float(it.get("dt_h", 0.0))
+        if dt_h <= 0:
+            continue
+        sx = float(it.get("sun_proxy", 0.0)) * float(it.get("weather_factor_hist", 1.0))
+        p_net_pred = -load_train + solar_train * sx
+        soc += (p_net_pred * dt_h / cap_wh) * 100.0
+        soc = max(0.0, min(100.0, soc))
+        actual = float(it.get("soc1", soc))
+        errs.append(soc - actual)
+
+        if float(it.get("sun_proxy", 0.0)) > 0.01:
+            dsoc = float(it.get("dsoc", 0.0))
+            p_obs = cap_wh * (dsoc / 100.0) / dt_h
+            obs_prod = max(0.0, p_obs + load_train)
+            pred_prod = max(0.0, solar_train * sx)
+            obs_day_e += obs_prod * dt_h
+            pred_day_e += pred_prod * dt_h
+            day_count += 1
+
+    if not errs:
+        return None
+    mae = sum(abs(e) for e in errs) / len(errs)
+    bias = sum(errs) / len(errs)
+    rmse = math.sqrt(sum(e * e for e in errs) / len(errs))
+    solar_scale_raw = (obs_day_e / pred_day_e) if pred_day_e > 1e-6 else 1.0
+    return {
+        "samples_train": len(train),
+        "samples_test": len(test),
+        "mae_soc": mae,
+        "bias_soc": bias,
+        "rmse_soc": rmse,
+        "horizon_error_soc": errs[-1],
+        "solar_scale_raw": solar_scale_raw,
+        "daylight_samples_test": day_count,
+    }
+
+
 # NOAA-style approximation; same model as the standalone script.
 def _solar_position_utc(ts_utc: datetime, lat_deg: float, lon_deg: float) -> tuple[float, float]:
     ts_utc = ts_utc.astimezone(UTC)
@@ -377,8 +483,6 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         cap_wh_current = cells_current * (cell_mah / 1000.0) * cell_v
         intervals: list[dict[str, Any]] = []
-        x: list[float] = []
-        y: list[float] = []
 
         for i in range(1, len(batt_rows)):
             p = batt_rows[i - 1]
@@ -390,11 +494,8 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             elev, az = _solar_position_utc(mid, lat, lon)
             sun_proxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
             w_hist, w_cond = _weather_factor_at(weather_hist_points, mid)
-            proxy = sun_proxy * w_hist
             dsoc = c.value - p.value
             net_obs = cap_wh_current * (dsoc / 100.0) / dt_h
-            x.append(proxy)
-            y.append(net_obs)
             intervals.append(
                 {
                     "tm": mid.isoformat(),
@@ -415,19 +516,12 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not intervals:
             raise UpdateFailed("No valid intervals")
 
-        night_obs = [p for p, sx in zip(y, x) if sx <= 0.01]
-        if night_obs:
-            load_w = max(0.0, -_mean(night_obs))
-        else:
-            load_w = max(0.0, -_mean(y))
-
-        day_xy = [(sx, p + load_w) for p, sx in zip(y, x) if sx > 0.01]
-        if day_xy:
-            num = sum(sx * yp for sx, yp in day_xy)
-            den = sum(sx * sx for sx, _ in day_xy)
-            solar_peak_w = max(0.0, num / den) if den > 0 else 0.0
-        else:
-            solar_peak_w = max(0.0, _mean(y) + load_w)
+        load_w, solar_peak_w = _fit_load_and_solar(intervals, cap_wh_current)
+        backtest_24h = _compute_backtest_24h(intervals, cap_wh_current)
+        solar_scale_24h = 1.0
+        if backtest_24h and int(backtest_24h.get("daylight_samples_test", 0)) >= 3:
+            solar_scale_24h = max(0.25, min(1.25, float(backtest_24h.get("solar_scale_raw", 1.0))))
+            solar_peak_w *= solar_scale_24h
 
         for it in intervals:
             p_clear = solar_peak_w * it["sun_proxy"]
@@ -604,8 +698,15 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ATTR_MODEL: {
                 "load_w": load_w,
                 "solar_peak_w": solar_peak_w,
-                "avg_net_w_observed": _mean(y),
+                "avg_net_w_observed": _mean([float(it.get("net_power_obs_w", 0.0)) for it in intervals]),
                 "current_production_weather_w": current_prod_weather_w,
+                "solar_scale_24h": solar_scale_24h,
+                "backtest_24h_mae_soc": (round(float(backtest_24h["mae_soc"]), 3) if backtest_24h else None),
+                "backtest_24h_bias_soc": (round(float(backtest_24h["bias_soc"]), 3) if backtest_24h else None),
+                "backtest_24h_rmse_soc": (round(float(backtest_24h["rmse_soc"]), 3) if backtest_24h else None),
+                "backtest_24h_horizon_error_soc": (round(float(backtest_24h["horizon_error_soc"]), 3) if backtest_24h else None),
+                "backtest_24h_samples_train": (int(backtest_24h["samples_train"]) if backtest_24h else None),
+                "backtest_24h_samples_test": (int(backtest_24h["samples_test"]) if backtest_24h else None),
             },
             ATTR_HISTORY_SOC: [{"t": s.ts.isoformat(), "v": s.value} for s in batt_rows],
             ATTR_HISTORY_VOLTAGE: [{"t": s.ts.isoformat(), "v": s.value} for s in volt_rows],
