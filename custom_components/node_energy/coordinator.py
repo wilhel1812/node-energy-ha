@@ -12,6 +12,10 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_APEX_SERIES,
+    ATTR_CHARGE_POWER_NOW_W,
+    ATTR_DISCHARGE_POWER_NOW_W,
+    ATTR_ENERGY_CHARGED_KWH_TOTAL,
+    ATTR_ENERGY_DISCHARGED_KWH_TOTAL,
     ATTR_FORECAST,
     ATTR_HISTORY_SOC,
     ATTR_HISTORY_VOLTAGE,
@@ -19,6 +23,9 @@ from .const import (
     ATTR_INTERVALS,
     ATTR_META,
     ATTR_MODEL,
+    ATTR_NET_POWER_AVG_24H_W,
+    ATTR_NET_POWER_NOW_W,
+    ATTR_NO_SUN_RUNTIME_DAYS,
     CONF_ANALYSIS_START,
     CONF_BATTERY_ENTITY,
     CONF_CELL_MAH,
@@ -521,6 +528,29 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         remain_wh_no_sun = max(0.0, min(100.0, soc_now)) / 100.0 * cap_wh_runtime
         no_sun_runtime_days = (remain_wh_no_sun / load_w / 24.0) if load_w > 0 else None
+
+        charged_wh_total = cap_wh_current * sum(max(0.0, float(it.get("dsoc", 0.0))) / 100.0 for it in intervals)
+        discharged_wh_total = cap_wh_current * sum(max(0.0, -float(it.get("dsoc", 0.0))) / 100.0 for it in intervals)
+
+        now_window_start = now_utc - timedelta(hours=24)
+        energy_24h_wh = 0.0
+        dur_24h_h = 0.0
+        for it in intervals:
+            tm = dt_util.parse_datetime(it.get("tm", ""))
+            if tm is None or tm < now_window_start:
+                continue
+            dt_h = float(it.get("dt_h", 0.0))
+            p_w = float(it.get("net_power_obs_w", 0.0))
+            energy_24h_wh += p_w * dt_h
+            dur_24h_h += dt_h
+        net_power_avg_24h_w = (energy_24h_wh / dur_24h_h) if dur_24h_h > 0 else None
+
+        now_solar_proxy = solar_proxy[0] if solar_proxy else 0.0
+        now_weather_factor = weather_factor[0] if weather_factor else 1.0
+        current_prod_weather_w = solar_peak_w * now_solar_proxy * now_weather_factor
+        net_power_now_w = -load_w + current_prod_weather_w
+        charge_power_now_w = max(0.0, net_power_now_w)
+        discharge_power_now_w = max(0.0, -net_power_now_w)
         sun_history: list[dict[str, Any]] = []
         for it in intervals:
             tm = dt_util.parse_datetime(it["tm"])
@@ -575,6 +605,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "load_w": load_w,
                 "solar_peak_w": solar_peak_w,
                 "avg_net_w_observed": _mean(y),
+                "current_production_weather_w": current_prod_weather_w,
             },
             ATTR_HISTORY_SOC: [{"t": s.ts.isoformat(), "v": s.value} for s in batt_rows],
             ATTR_HISTORY_VOLTAGE: [{"t": s.ts.isoformat(), "v": s.value} for s in volt_rows],
@@ -590,7 +621,13 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ATTR_INTERVALS: intervals,
             ATTR_FORECAST: forecast,
             ATTR_APEX_SERIES: apex_series,
-            "no_sun_runtime_days": round(no_sun_runtime_days, 3) if no_sun_runtime_days is not None else None,
+            ATTR_NO_SUN_RUNTIME_DAYS: round(no_sun_runtime_days, 3) if no_sun_runtime_days is not None else None,
+            ATTR_NET_POWER_NOW_W: round(net_power_now_w, 3),
+            ATTR_NET_POWER_AVG_24H_W: round(net_power_avg_24h_w, 3) if net_power_avg_24h_w is not None else None,
+            ATTR_CHARGE_POWER_NOW_W: round(charge_power_now_w, 3),
+            ATTR_DISCHARGE_POWER_NOW_W: round(discharge_power_now_w, 3),
+            ATTR_ENERGY_CHARGED_KWH_TOTAL: round(charged_wh_total / 1000.0, 5),
+            ATTR_ENERGY_DISCHARGED_KWH_TOTAL: round(discharged_wh_total / 1000.0, 5),
             "native_value": round(latest_soc, 2),
         }
 

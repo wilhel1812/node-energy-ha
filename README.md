@@ -18,11 +18,37 @@ This integration now exposes precomputed chart series in `sensor.<your_node_ener
 - `battery_entity` (required)
 - `voltage_entity` (optional)
 - `weather_entity` (optional)
-- `start_hour` (0-23)
-- `start_date` (optional; use this to cut off bad pre-solar data)
+- `analysis_start` (optional datetime; use this to cut off bad pre-solar data)
 - `cells_current`, `cell_mah`, `cell_v`, `horizon_days`
 
 You can create multiple entries for multiple nodes.
+
+## Exposed native entities
+Per integration entry, this integration now exposes:
+- SOC sensor (`%`)
+- No-sun runtime (`d`)
+- Net power now (`W`)
+- Net power avg 24h (`W`)
+- Charge power now (`W`)
+- Discharge power now (`W`)
+- Energy charged total (`kWh`, `total_increasing`)
+- Energy discharged total (`kWh`, `total_increasing`)
+
+These can be used directly in native HA cards (Entity, Tile, Gauge, Statistics, History, etc.).
+
+## Energy Dashboard mapping
+For native Energy Dashboard battery flows, use:
+- `Energy charged total` as battery charge energy
+- `Energy discharged total` as battery discharge energy
+
+Both are exposed as `device_class: energy`, unit `kWh`, `state_class: total_increasing`, which is what Energy Dashboard expects for cumulative energy statistics.
+
+For Power Flow card / power inputs, use:
+- `Net power now`
+- `Charge power now`
+- `Discharge power now`
+
+These are exposed as `device_class: power`, unit `W`, `state_class: measurement`.
 
 ## ApexCharts setup
 Install [ApexCharts Card](https://github.com/RomRider/apexcharts-card) from HACS (Dashboard).
