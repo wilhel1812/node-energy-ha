@@ -467,12 +467,12 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             return []
 
-        fc = (
-            (resp or {})
-            .get("service_response", {})
-            .get(weather_entity, {})
-            .get("forecast", [])
-        )
+        payload = resp or {}
+        # HA return shape differs by version:
+        # - {"service_response": {"weather.x": {"forecast": [...]}}}
+        # - {"weather.x": {"forecast": [...]}}
+        root = payload.get("service_response", payload)
+        fc = (root.get(weather_entity, {}) or {}).get("forecast", [])
         rows: list[dict[str, Any]] = []
         for p in fc:
             ts = dt_util.parse_datetime(p.get("datetime"))
