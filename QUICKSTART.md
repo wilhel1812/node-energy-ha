@@ -21,7 +21,7 @@ git remote add origin <YOUR_NODE_ENERGY_HA_REPO_URL>
 - HACS -> Frontend -> search `ApexCharts Card`
 - Install and reload UI
 
-## 4) Install setup helper card (recommended)
+## 4) Install dashboard card (recommended)
 - HACS -> Custom repositories -> add `https://github.com/wilhel1812/node-energy-card` as `Dashboard`
 - Install `Battery Telemetry Card`
 - Add card type `custom:battery-telemetry-card`

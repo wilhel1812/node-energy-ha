@@ -134,7 +134,7 @@ Replace `sensor.wam6` with your Battery Telemetry sensor.
 Run from integration repo:
 
 ```bash
-./scripts/release_both.sh 0.4.0
+./scripts/release_both.sh 0.5.0
 ```
 
 This publishes matching tags for the integration and setup-card repos.
