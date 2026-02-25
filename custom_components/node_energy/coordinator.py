@@ -84,6 +84,14 @@ def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
+def _ensure_utc(ts: datetime | None) -> datetime | None:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC)
+
+
 def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple[float, float]:
     if not intervals or cap_wh <= 0:
         return 0.0, 0.0
@@ -433,6 +441,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if v is None:
                     continue
                 t = getattr(st, "last_updated", None) or getattr(st, "last_changed", None)
+                t = _ensure_utc(t)
                 if t is None:
                     continue
                 out.append(Sample(ts=t, value=v))
@@ -465,6 +474,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             out: list[dict[str, Any]] = []
             for st in items:
                 t = getattr(st, "last_updated", None) or getattr(st, "last_changed", None)
+                t = _ensure_utc(t)
                 if t is None:
                     continue
                 attrs = getattr(st, "attributes", {}) or {}
@@ -510,7 +520,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         fc = (root.get(weather_entity, {}) or {}).get("forecast", [])
         rows: list[dict[str, Any]] = []
         for p in fc:
-            ts = dt_util.parse_datetime(p.get("datetime"))
+            ts = _ensure_utc(dt_util.parse_datetime(p.get("datetime")))
             if not ts:
                 continue
             cloud = _parse_float(p.get("cloud_coverage"))
@@ -565,7 +575,9 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
         else:
             start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
-        start_utc = start_local.astimezone(UTC)
+        start_utc = _ensure_utc(start_local.astimezone(UTC))
+        if start_utc is None:
+            raise UpdateFailed("Invalid analysis start timestamp")
 
         batt_rows = await self._async_fetch_history(battery_entity, start_utc)
         volt_rows = await self._async_fetch_history(voltage_entity, start_utc) if voltage_entity else []
@@ -647,8 +659,8 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             it["net_power_model_w"] = -load_w + p_prod
 
         latest_soc = batt_rows[-1].value
-        latest_ts = batt_rows[-1].ts
-        now_utc = dt_util.utcnow().astimezone(UTC)
+        latest_ts = _ensure_utc(batt_rows[-1].ts) or batt_rows[-1].ts
+        now_utc = _ensure_utc(dt_util.utcnow()) or datetime.now(UTC)
 
         step_min = 10
         step_delta = timedelta(minutes=step_min)
