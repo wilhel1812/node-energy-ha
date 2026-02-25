@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from homeassistant.util import dt as dt_util
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -13,6 +14,8 @@ from .const import (
     ATTR_ENERGY_CHARGED_KWH_TOTAL,
     ATTR_ENERGY_DISCHARGED_KWH_TOTAL,
     ATTR_FORECAST,
+    ATTR_FULL_CHARGE_AT,
+    ATTR_FULL_CHARGE_ETA_HOURS,
     ATTR_HISTORY_SOC,
     ATTR_HISTORY_VOLTAGE,
     ATTR_HISTORY_WEATHER,
@@ -55,6 +58,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             NodeEnergyMetricSensor(
                 coordinator, entry, "energy_discharged_total", "Energy discharged total", ATTR_ENERGY_DISCHARGED_KWH_TOTAL, "kWh",
                 icon="mdi:battery-minus", state_class=SensorStateClass.TOTAL_INCREASING, device_class=SensorDeviceClass.ENERGY,
+            ),
+            NodeEnergyMetricSensor(
+                coordinator, entry, "full_charge_eta_hours", "Full charge ETA", ATTR_FULL_CHARGE_ETA_HOURS, "h",
+                icon="mdi:battery-charging-high", state_class=SensorStateClass.MEASUREMENT, device_class=SensorDeviceClass.DURATION,
+            ),
+            NodeEnergyTimestampSensor(
+                coordinator, entry, "full_charge_at", "Full charge at", ATTR_FULL_CHARGE_AT, icon="mdi:clock-check-outline",
             ),
         ],
         True,
@@ -139,3 +149,31 @@ class NodeEnergyMetricSensor(CoordinatorEntity, SensorEntity):
     def native_value(self):
         v = (self.coordinator.data or {}).get(self._data_key)
         return round(float(v), 5) if v is not None else None
+
+
+class NodeEnergyTimestampSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = False
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(
+        self,
+        coordinator,
+        entry: ConfigEntry,
+        unique_suffix: str,
+        label: str,
+        data_key: str,
+        *,
+        icon: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._data_key = data_key
+        self._attr_unique_id = f"{entry.entry_id}_{unique_suffix}"
+        self._attr_name = f"{entry.title} {label}"
+        self._attr_icon = icon
+
+    @property
+    def native_value(self):
+        raw = (self.coordinator.data or {}).get(self._data_key)
+        if not raw:
+            return None
+        return dt_util.parse_datetime(str(raw))

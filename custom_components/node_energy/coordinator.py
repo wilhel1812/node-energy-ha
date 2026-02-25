@@ -17,6 +17,8 @@ from .const import (
     ATTR_ENERGY_CHARGED_KWH_TOTAL,
     ATTR_ENERGY_DISCHARGED_KWH_TOTAL,
     ATTR_FORECAST,
+    ATTR_FULL_CHARGE_AT,
+    ATTR_FULL_CHARGE_ETA_HOURS,
     ATTR_HISTORY_SOC,
     ATTR_HISTORY_VOLTAGE,
     ATTR_HISTORY_WEATHER,
@@ -808,6 +810,17 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         remain_wh_no_sun = max(0.0, min(100.0, soc_now)) / 100.0 * cap_wh_runtime
         no_sun_runtime_days = (remain_wh_no_sun / load_w / 24.0) if load_w > 0 else None
 
+        full_charge_at: datetime | None = None
+        full_charge_eta_h: float | None = None
+        for p in soc_projection_weather:
+            y = float(p.get("y", 0.0))
+            if y >= 99.9:
+                t = dt_util.parse_datetime(str(p.get("x", "")))
+                if t is not None:
+                    full_charge_at = t
+                    full_charge_eta_h = max(0.0, (t - now_utc).total_seconds() / 3600.0)
+                break
+
         charged_wh_total = cap_wh_current * sum(max(0.0, float(it.get("dsoc", 0.0))) / 100.0 for it in intervals)
         discharged_wh_total = cap_wh_current * sum(max(0.0, -float(it.get("dsoc", 0.0))) / 100.0 for it in intervals)
 
@@ -928,6 +941,8 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ATTR_DISCHARGE_POWER_NOW_W: round(discharge_power_now_w, 3),
             ATTR_ENERGY_CHARGED_KWH_TOTAL: round(charged_wh_total / 1000.0, 5),
             ATTR_ENERGY_DISCHARGED_KWH_TOTAL: round(discharged_wh_total / 1000.0, 5),
+            ATTR_FULL_CHARGE_ETA_HOURS: (round(full_charge_eta_h, 3) if full_charge_eta_h is not None else None),
+            ATTR_FULL_CHARGE_AT: (full_charge_at.isoformat() if full_charge_at is not None else None),
             "native_value": round(latest_soc, 2),
         }
 
