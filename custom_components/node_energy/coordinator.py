@@ -193,20 +193,37 @@ def _build_empirical_weather_quantiles_by_hour(
 def _weather_factor_interpolated(points: list[dict[str, Any]], ts: datetime) -> float | None:
     if not points:
         return None
-    if ts < points[0]["ts"] or ts > points[-1]["ts"]:
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    else:
+        ts = ts.astimezone(UTC)
+
+    p0 = points[0]["ts"]
+    pN = points[-1]["ts"]
+    if p0.tzinfo is None:
+        p0 = p0.replace(tzinfo=UTC)
+    else:
+        p0 = p0.astimezone(UTC)
+    if pN.tzinfo is None:
+        pN = pN.replace(tzinfo=UTC)
+    else:
+        pN = pN.astimezone(UTC)
+    if ts < p0 or ts > pN:
         return None
-    if ts == points[0]["ts"]:
+    if ts == p0:
         return float(points[0]["factor"])
-    if ts == points[-1]["ts"]:
+    if ts == pN:
         return float(points[-1]["factor"])
     for i in range(1, len(points)):
         a = points[i - 1]
         b = points[i]
-        if a["ts"] <= ts <= b["ts"]:
-            span = (b["ts"] - a["ts"]).total_seconds()
+        ta = a["ts"].replace(tzinfo=UTC) if a["ts"].tzinfo is None else a["ts"].astimezone(UTC)
+        tb = b["ts"].replace(tzinfo=UTC) if b["ts"].tzinfo is None else b["ts"].astimezone(UTC)
+        if ta <= ts <= tb:
+            span = (tb - ta).total_seconds()
             if span <= 0:
                 return float(a["factor"])
-            k = (ts - a["ts"]).total_seconds() / span
+            k = (ts - ta).total_seconds() / span
             return float(a["factor"]) + (float(b["factor"]) - float(a["factor"])) * k
     return None
 
@@ -719,8 +736,8 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 mid = t + (t_next - t) / 2
                 elev, _ = _solar_position_utc(mid, lat, lon)
                 sproxy = max(0.0, math.sin(math.radians(max(elev, 0.0))))
-                wf = _weather_factor_for_future(mid)
-                p_prod = solar_peak_w * sproxy * (wf if use_weather else 1.0)
+                wf50, _ = _weather_factors_for_future(mid)
+                p_prod = solar_peak_w * sproxy * (wf50 if use_weather else 1.0)
                 p_net = -load_w + p_prod
                 soc += (p_net * dt_h / cap_wh) * 100.0
                 soc = max(0.0, min(100.0, soc))
