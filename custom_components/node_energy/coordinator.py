@@ -43,6 +43,8 @@ from .const import (
     DEFAULT_CELL_V,
     DEFAULT_CELLS_CURRENT,
     DEFAULT_HORIZON_DAYS,
+    DEFAULT_MODEL_WINDOW_DAYS,
+    DEFAULT_PAYLOAD_WINDOW_DAYS,
     DEFAULT_START_HOUR,
     DOMAIN,
     UPDATE_INTERVAL_MINUTES,
@@ -92,6 +94,21 @@ def _ensure_utc(ts: datetime | None) -> datetime | None:
     if ts.tzinfo is None:
         return ts.replace(tzinfo=UTC)
     return ts.astimezone(UTC)
+
+
+def _clip_samples_after(samples: list[Sample], cutoff: datetime) -> list[Sample]:
+    return [s for s in samples if s.ts >= cutoff]
+
+
+def _clip_dict_rows_after(rows: list[dict[str, Any]], key: str, cutoff: datetime) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        raw = row.get(key)
+        ts = raw if isinstance(raw, datetime) else dt_util.parse_datetime(str(raw or ""))
+        ts = _ensure_utc(ts)
+        if ts is not None and ts >= cutoff:
+            out.append(row)
+    return out
 
 
 def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple[float, float]:
@@ -576,6 +593,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         now_local = dt_util.now()
         start_local: datetime
+        explicit_start = False
         analysis_start = cfg.get(CONF_ANALYSIS_START)
         if analysis_start:
             parsed_dt = dt_util.parse_datetime(str(analysis_start))
@@ -584,16 +602,19 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     start_local = parsed_dt.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
                 else:
                     start_local = parsed_dt.astimezone(dt_util.DEFAULT_TIME_ZONE)
+                explicit_start = True
             else:
-                start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
+                start_local = now_local - timedelta(days=DEFAULT_MODEL_WINDOW_DAYS)
         elif start_date:
             parsed_date = dt_util.parse_date(str(start_date))
             if parsed_date:
                 start_local = datetime(parsed_date.year, parsed_date.month, parsed_date.day, start_hour, 0, 0, tzinfo=dt_util.DEFAULT_TIME_ZONE)
+                explicit_start = True
             else:
-                start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
+                start_local = now_local - timedelta(days=DEFAULT_MODEL_WINDOW_DAYS)
         else:
-            start_local = (now_local - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
+            # No manual start configured: train from a long rolling window.
+            start_local = now_local - timedelta(days=DEFAULT_MODEL_WINDOW_DAYS)
         start_utc = _ensure_utc(start_local.astimezone(UTC))
         if start_utc is None:
             raise UpdateFailed("Invalid analysis start timestamp")
@@ -793,7 +814,13 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "scenarios_clear": {str(c): simulate(c, False) for c in scenario_cells},
         }
 
-        soc_actual = [{"x": s.ts.isoformat(), "y": s.value} for s in batt_rows]
+        payload_start_utc = start_utc if explicit_start else now_utc - timedelta(days=DEFAULT_PAYLOAD_WINDOW_DAYS)
+        batt_rows_payload = _clip_samples_after(batt_rows, payload_start_utc)
+        volt_rows_payload = _clip_samples_after(volt_rows, payload_start_utc)
+        weather_hist_points_payload = _clip_dict_rows_after(weather_hist_points, "ts", payload_start_utc)
+        intervals_payload = _clip_dict_rows_after(intervals, "tm", payload_start_utc)
+
+        soc_actual = [{"x": s.ts.isoformat(), "y": s.value} for s in batt_rows_payload]
         soc_projection_weather = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios"].get(str(cells_current), []), strict=False)]
         soc_projection_weather_p20 = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios_p20"].get(str(cells_current), []), strict=False)]
         soc_projection_clear = [{"x": t, "y": v} for t, v in zip(times, forecast["scenarios_clear"].get(str(cells_current), []), strict=False)]
@@ -844,7 +871,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         charge_power_now_w = max(0.0, net_power_now_w)
         discharge_power_now_w = max(0.0, -net_power_now_w)
         sun_history: list[dict[str, Any]] = []
-        for it in intervals:
+        for it in intervals_payload:
             tm = dt_util.parse_datetime(it["tm"])
             if tm and tm < now_utc:
                 sun_history.append({"x": it["tm"], "y": it["sun_elev_deg"]})
@@ -857,11 +884,11 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 sun_history.append({"x": t_hist.isoformat(), "y": elev})
                 t_hist += step_delta
         sun_forecast = [{"x": t, "y": e} for t, e in zip(times, solar_elev, strict=False)]
-        power_observed = [{"x": it["tm"], "y": it["net_power_obs_w"]} for it in intervals]
-        power_modeled = [{"x": it["tm"], "y": it["net_power_model_w"]} for it in intervals]
-        power_prod_weather = [{"x": it["tm"], "y": it["production_w"]} for it in intervals]
-        power_prod_clear = [{"x": it["tm"], "y": it["production_clear_w"]} for it in intervals]
-        power_consumption = [{"x": it["tm"], "y": it["consumption_w"]} for it in intervals]
+        power_observed = [{"x": it["tm"], "y": it["net_power_obs_w"]} for it in intervals_payload]
+        power_modeled = [{"x": it["tm"], "y": it["net_power_model_w"]} for it in intervals_payload]
+        power_prod_weather = [{"x": it["tm"], "y": it["production_w"]} for it in intervals_payload]
+        power_prod_clear = [{"x": it["tm"], "y": it["production_clear_w"]} for it in intervals_payload]
+        power_consumption = [{"x": it["tm"], "y": it["consumption_w"]} for it in intervals_payload]
 
         apex_series = {
             "now": now_utc.isoformat(),
@@ -887,6 +914,9 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "weather_entity": weather_entity,
                 "start_hour": start_hour,
                 "start_date": start_local.date().isoformat(),
+                "analysis_mode": ("manual" if explicit_start else "rolling_default"),
+                "model_window_days": DEFAULT_MODEL_WINDOW_DAYS,
+                "payload_window_days": (None if explicit_start else DEFAULT_PAYLOAD_WINDOW_DAYS),
                 "cells_current": cells_current,
                 "cell_mah": cell_mah,
                 "cell_v": cell_v,
@@ -920,8 +950,8 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "backtest_24h_samples_train": (int(backtest_24h["samples_train"]) if backtest_24h else None),
                 "backtest_24h_samples_test": (int(backtest_24h["samples_test"]) if backtest_24h else None),
             },
-            ATTR_HISTORY_SOC: [{"t": s.ts.isoformat(), "v": s.value} for s in batt_rows],
-            ATTR_HISTORY_VOLTAGE: [{"t": s.ts.isoformat(), "v": s.value} for s in volt_rows],
+            ATTR_HISTORY_SOC: [{"t": s.ts.isoformat(), "v": s.value} for s in batt_rows_payload],
+            ATTR_HISTORY_VOLTAGE: [{"t": s.ts.isoformat(), "v": s.value} for s in volt_rows_payload],
             ATTR_HISTORY_WEATHER: [
                 {
                     "t": p["ts"].isoformat(),
@@ -929,9 +959,9 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "cloud_coverage": p.get("cloud_coverage"),
                     "factor": p.get("factor", 1.0),
                 }
-                for p in weather_hist_points
+                for p in weather_hist_points_payload
             ],
-            ATTR_INTERVALS: intervals,
+            ATTR_INTERVALS: intervals_payload,
             ATTR_FORECAST: forecast,
             ATTR_APEX_SERIES: apex_series,
             ATTR_NO_SUN_RUNTIME_DAYS: round(no_sun_runtime_days, 3) if no_sun_runtime_days is not None else None,
