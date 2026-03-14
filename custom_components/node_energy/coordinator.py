@@ -168,6 +168,16 @@ def _fit_load_and_solar(
         num = sum(w * sx * yp for sx, yp, w in day_xy)
         den = sum(w * sx * sx for sx, _, w in day_xy)
         solar_peak_w = max(0.0, num / den) if den > 0 else 0.0
+        # If weighted regression collapses to zero, recover a conservative positive
+        # estimate from daylight intervals that still show net positive charge.
+        if solar_peak_w <= 0.0:
+            pos_ratios = [
+                yp / sx
+                for sx, yp, _ in day_xy
+                if sx >= 0.03 and yp > 0.0
+            ]
+            if pos_ratios:
+                solar_peak_w = _clamp(_quantile(pos_ratios, 0.5), 0.0, 20.0)
     else:
         solar_peak_w = max(0.0, _weighted_mean(y, ws) + load_w)
     return load_w, solar_peak_w
