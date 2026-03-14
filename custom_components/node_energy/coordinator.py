@@ -61,6 +61,15 @@ def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
 
+def _weighted_mean(xs: list[float], ws: list[float]) -> float:
+    if not xs or not ws or len(xs) != len(ws):
+        return _mean(xs)
+    den = sum(max(0.0, w) for w in ws)
+    if den <= 0:
+        return _mean(xs)
+    return sum(x * max(0.0, w) for x, w in zip(xs, ws, strict=False)) / den
+
+
 def _parse_float(v: Any) -> float | None:
     try:
         return float(v)
@@ -111,12 +120,19 @@ def _clip_dict_rows_after(rows: list[dict[str, Any]], key: str, cutoff: datetime
     return out
 
 
-def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple[float, float]:
+def _fit_load_and_solar(
+    intervals: list[dict[str, Any]],
+    cap_wh: float,
+    *,
+    reference_ts: datetime | None = None,
+    half_life_days: float = 14.0,
+) -> tuple[float, float]:
     if not intervals or cap_wh <= 0:
         return 0.0, 0.0
 
     x: list[float] = []
     y: list[float] = []
+    ws: list[float] = []
     for it in intervals:
         dt_h = float(it.get("dt_h", 0.0))
         dsoc = float(it.get("dsoc", 0.0))
@@ -124,25 +140,34 @@ def _fit_load_and_solar(intervals: list[dict[str, Any]], cap_wh: float) -> tuple
             continue
         sx = float(it.get("sun_proxy", 0.0)) * float(it.get("weather_factor_hist", 1.0))
         p_obs = cap_wh * (dsoc / 100.0) / dt_h
+        tm = dt_util.parse_datetime(str(it.get("tm", "")))
+        tm = _ensure_utc(tm)
+        if reference_ts is not None and tm is not None:
+            age_days = max(0.0, (reference_ts - tm).total_seconds() / 86400.0)
+            decay = math.exp(-math.log(2.0) * age_days / max(0.1, half_life_days))
+        else:
+            decay = 1.0
         x.append(sx)
         y.append(p_obs)
+        ws.append(decay)
 
     if not y:
         return 0.0, 0.0
 
     night_obs = [p for p, sx in zip(y, x, strict=False) if sx <= 0.01]
+    night_w = [w for w, sx in zip(ws, x, strict=False) if sx <= 0.01]
     if night_obs:
-        load_w = max(0.0, -_mean(night_obs))
+        load_w = max(0.0, -_weighted_mean(night_obs, night_w))
     else:
-        load_w = max(0.0, -_mean(y))
+        load_w = max(0.0, -_weighted_mean(y, ws))
 
-    day_xy = [(sx, p + load_w) for p, sx in zip(y, x, strict=False) if sx > 0.01]
+    day_xy = [(sx, p + load_w, w) for p, sx, w in zip(y, x, ws, strict=False) if sx > 0.01]
     if day_xy:
-        num = sum(sx * yp for sx, yp in day_xy)
-        den = sum(sx * sx for sx, _ in day_xy)
+        num = sum(w * sx * yp for sx, yp, w in day_xy)
+        den = sum(w * sx * sx for sx, _, w in day_xy)
         solar_peak_w = max(0.0, num / den) if den > 0 else 0.0
     else:
-        solar_peak_w = max(0.0, _mean(y) + load_w)
+        solar_peak_w = max(0.0, _weighted_mean(y, ws) + load_w)
     return load_w, solar_peak_w
 
 
@@ -315,6 +340,101 @@ def _compute_backtest_24h(intervals: list[dict[str, Any]], cap_wh: float) -> dic
         "horizon_error_soc": errs[-1],
         "solar_scale_raw": solar_scale_raw,
         "daylight_samples_test": day_count,
+    }
+
+
+def _compute_walkforward_backtest(intervals: list[dict[str, Any]], cap_wh: float) -> dict[str, float | int] | None:
+    if len(intervals) < 30 or cap_wh <= 0:
+        return None
+
+    enriched: list[dict[str, Any]] = []
+    for it in intervals:
+        tm = _ensure_utc(dt_util.parse_datetime(str(it.get("tm", ""))))
+        if tm is None:
+            continue
+        e = dict(it)
+        e["_tm"] = tm
+        enriched.append(e)
+    if len(enriched) < 30:
+        return None
+    enriched.sort(key=lambda it: it["_tm"])
+
+    latest_tm = enriched[-1]["_tm"]
+    start_anchors_after = latest_tm - timedelta(days=10)
+    anchors: list[int] = []
+    for i, it in enumerate(enriched):
+        tm = it["_tm"]
+        if tm < start_anchors_after:
+            continue
+        end_tm = tm + timedelta(hours=24)
+        if end_tm > latest_tm:
+            continue
+        if i % 6 == 0:  # roughly hourly anchor cadence on 10m samples
+            anchors.append(i)
+    if not anchors:
+        return None
+    anchors = anchors[-8:]
+
+    mae_list: list[float] = []
+    bias_list: list[float] = []
+    rmse_list: list[float] = []
+    horiz_list: list[float] = []
+    scale_list: list[float] = []
+    samples_used = 0
+
+    for idx in anchors:
+        anchor_tm = enriched[idx]["_tm"]
+        train = [it for it in enriched if it["_tm"] <= anchor_tm]
+        test = [it for it in enriched if anchor_tm < it["_tm"] <= anchor_tm + timedelta(hours=24)]
+        if len(train) < 12 or len(test) < 6:
+            continue
+
+        load_train, solar_train = _fit_load_and_solar(train, cap_wh, reference_ts=anchor_tm)
+        soc = float(test[0].get("soc0", 0.0))
+        errs: list[float] = []
+        obs_day_e = 0.0
+        pred_day_e = 0.0
+        day_count = 0
+        for it in test:
+            dt_h = float(it.get("dt_h", 0.0))
+            if dt_h <= 0:
+                continue
+            sx = float(it.get("sun_proxy", 0.0)) * float(it.get("weather_factor_hist", 1.0))
+            p_net_pred = -load_train + solar_train * sx
+            soc += (p_net_pred * dt_h / cap_wh) * 100.0
+            soc = max(0.0, min(100.0, soc))
+            actual = float(it.get("soc1", soc))
+            errs.append(soc - actual)
+
+            if float(it.get("sun_proxy", 0.0)) > 0.01:
+                dsoc = float(it.get("dsoc", 0.0))
+                p_obs = cap_wh * (dsoc / 100.0) / dt_h
+                obs_prod = max(0.0, p_obs + load_train)
+                pred_prod = max(0.0, solar_train * sx)
+                obs_day_e += obs_prod * dt_h
+                pred_day_e += pred_prod * dt_h
+                day_count += 1
+
+        if not errs:
+            continue
+        mae_list.append(sum(abs(e) for e in errs) / len(errs))
+        bias_list.append(sum(errs) / len(errs))
+        rmse_list.append(math.sqrt(sum(e * e for e in errs) / len(errs)))
+        horiz_list.append(errs[-1])
+        if pred_day_e > 1e-6 and day_count >= 3:
+            scale_list.append(obs_day_e / pred_day_e)
+        samples_used += 1
+
+    if samples_used == 0:
+        return None
+    scale_med = _quantile(scale_list, 0.5) if scale_list else 1.0
+    return {
+        "anchors_used": samples_used,
+        "mae_soc": _quantile(mae_list, 0.5) if mae_list else None,
+        "bias_soc": _quantile(bias_list, 0.5) if bias_list else None,
+        "rmse_soc": _quantile(rmse_list, 0.5) if rmse_list else None,
+        "horizon_error_soc": _quantile(horiz_list, 0.5) if horiz_list else None,
+        "solar_scale_raw": scale_med,
     }
 
 
@@ -672,13 +792,19 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not intervals:
             raise UpdateFailed("No valid intervals")
 
-        load_w, solar_peak_w_raw = _fit_load_and_solar(intervals, cap_wh_current)
+        now_utc = _ensure_utc(dt_util.utcnow()) or datetime.now(UTC)
+        load_w, solar_peak_w_raw = _fit_load_and_solar(intervals, cap_wh_current, reference_ts=now_utc)
         backtest_24h = _compute_backtest_24h(intervals, cap_wh_current)
+        backtest_walk = _compute_walkforward_backtest(intervals, cap_wh_current)
         solar_scale_24h_raw = 1.0
-        if backtest_24h and int(backtest_24h.get("daylight_samples_test", 0)) >= 3:
+        if backtest_walk and backtest_walk.get("solar_scale_raw") is not None:
+            solar_scale_24h_raw = _clamp(float(backtest_walk.get("solar_scale_raw", 1.0)), 0.5, 1.5)
+        elif backtest_24h and int(backtest_24h.get("daylight_samples_test", 0)) >= 3:
             solar_scale_24h_raw = _clamp(float(backtest_24h.get("solar_scale_raw", 1.0)), 0.5, 1.5)
         bt_conf = 0.0
-        if backtest_24h:
+        if backtest_walk and backtest_walk.get("anchors_used") is not None:
+            bt_conf = _clamp(float(backtest_walk.get("anchors_used", 0)) / 6.0, 0.0, 1.0)
+        elif backtest_24h:
             bt_conf = _clamp(int(backtest_24h.get("daylight_samples_test", 0)) / 12.0, 0.0, 1.0)
         solar_scale_24h = 1.0 + (solar_scale_24h_raw - 1.0) * bt_conf
         solar_scale_24h = _clamp(solar_scale_24h, 0.5, 1.5)
@@ -700,16 +826,11 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         latest_soc = batt_rows[-1].value
         latest_ts = _ensure_utc(batt_rows[-1].ts) or batt_rows[-1].ts
-        now_utc = _ensure_utc(dt_util.utcnow()) or datetime.now(UTC)
 
         step_min = 10
         step_delta = timedelta(minutes=step_min)
         steps = int((max(1, min(14, horizon_days)) * 24 * 60) / step_min)
 
-        weather_all = sorted(
-            [*weather_hist_points, *weather_forecast_points],
-            key=lambda p: p.get("ts") or datetime.min.replace(tzinfo=UTC),
-        )
         provider_forecast_end = weather_forecast_points[-1]["ts"] if weather_forecast_points else None
         provider_forecast_start = weather_forecast_points[0]["ts"] if weather_forecast_points else None
 
@@ -949,6 +1070,11 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "backtest_24h_horizon_error_soc": (round(float(backtest_24h["horizon_error_soc"]), 3) if backtest_24h else None),
                 "backtest_24h_samples_train": (int(backtest_24h["samples_train"]) if backtest_24h else None),
                 "backtest_24h_samples_test": (int(backtest_24h["samples_test"]) if backtest_24h else None),
+                "backtest_walk_mae_soc": (round(float(backtest_walk["mae_soc"]), 3) if backtest_walk and backtest_walk.get("mae_soc") is not None else None),
+                "backtest_walk_bias_soc": (round(float(backtest_walk["bias_soc"]), 3) if backtest_walk and backtest_walk.get("bias_soc") is not None else None),
+                "backtest_walk_rmse_soc": (round(float(backtest_walk["rmse_soc"]), 3) if backtest_walk and backtest_walk.get("rmse_soc") is not None else None),
+                "backtest_walk_horizon_error_soc": (round(float(backtest_walk["horizon_error_soc"]), 3) if backtest_walk and backtest_walk.get("horizon_error_soc") is not None else None),
+                "backtest_walk_anchors_used": (int(backtest_walk["anchors_used"]) if backtest_walk and backtest_walk.get("anchors_used") is not None else None),
             },
             ATTR_HISTORY_SOC: [{"t": s.ts.isoformat(), "v": s.value} for s in batt_rows_payload],
             ATTR_HISTORY_VOLTAGE: [{"t": s.ts.isoformat(), "v": s.value} for s in volt_rows_payload],
