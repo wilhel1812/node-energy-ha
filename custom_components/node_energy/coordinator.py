@@ -982,17 +982,27 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         trend_h = 0.0
         if len(soc_projection_weather) >= 2:
             p0 = soc_projection_weather[0]
-            p1 = soc_projection_weather[-1]
             t0 = _ensure_utc(dt_util.parse_datetime(str(p0.get("x", ""))))
-            t1 = _ensure_utc(dt_util.parse_datetime(str(p1.get("x", ""))))
             y0 = float(p0.get("y", 0.0))
-            y1 = float(p1.get("y", 0.0))
-            if t0 is not None and t1 is not None:
-                span_h = max(0.0, (t1 - t0).total_seconds() / 3600.0)
-                if span_h > 0.0:
-                    trend_h = (y1 - y0) / span_h
+            if t0 is not None:
+                best_delta = 0.0
+                best_h = 0.0
+                for p in soc_projection_weather[1:]:
+                    t = _ensure_utc(dt_util.parse_datetime(str(p.get("x", ""))))
+                    if t is None:
+                        continue
+                    span_h = (t - t0).total_seconds() / 3600.0
+                    if span_h <= 0.0:
+                        continue
+                    y = float(p.get("y", 0.0))
+                    delta = y - y0
+                    if abs(delta) > abs(best_delta):
+                        best_delta = delta
+                        best_h = span_h
+                if best_h > 0.0:
+                    trend_h = best_delta / best_h
 
-        trend_eps = 1e-6
+        trend_eps = 1e-4
         if trend_h > trend_eps:
             primary_eta_mode = "charge"
             for seq in (soc_projection_weather, soc_projection_clear):
