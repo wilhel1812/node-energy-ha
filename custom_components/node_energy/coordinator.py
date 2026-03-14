@@ -992,7 +992,7 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if span_h > 0.0:
                     trend_h = (y1 - y0) / span_h
 
-        trend_eps = 0.01
+        trend_eps = 1e-6
         if trend_h > trend_eps:
             primary_eta_mode = "charge"
             for seq in (soc_projection_weather, soc_projection_clear):
