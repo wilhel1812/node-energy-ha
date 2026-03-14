@@ -25,6 +25,8 @@ from .const import (
     ATTR_NET_POWER_AVG_24H_W,
     ATTR_NET_POWER_NOW_W,
     ATTR_NO_SUN_RUNTIME_DAYS,
+    ATTR_RUNTIME_AT,
+    ATTR_RUNTIME_ETA_HOURS,
     DOMAIN,
 )
 
@@ -65,6 +67,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ),
             NodeEnergyTimestampSensor(
                 coordinator, entry, "full_charge_at", "Full charge at", ATTR_FULL_CHARGE_AT, icon="mdi:clock-check-outline",
+            ),
+            NodeEnergyMetricSensor(
+                coordinator, entry, "runtime_eta_hours", "Runtime ETA", ATTR_RUNTIME_ETA_HOURS, "h",
+                icon="mdi:timer-sand", state_class=SensorStateClass.MEASUREMENT, device_class=SensorDeviceClass.DURATION,
+            ),
+            NodeEnergyTimestampSensor(
+                coordinator, entry, "runtime_at", "Runtime at", ATTR_RUNTIME_AT, icon="mdi:clock-alert-outline",
             ),
         ],
         True,

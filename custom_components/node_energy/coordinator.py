@@ -28,6 +28,9 @@ from .const import (
     ATTR_NET_POWER_AVG_24H_W,
     ATTR_NET_POWER_NOW_W,
     ATTR_NO_SUN_RUNTIME_DAYS,
+    ATTR_PRIMARY_ETA_MODE,
+    ATTR_RUNTIME_AT,
+    ATTR_RUNTIME_ETA_HOURS,
     CONF_ANALYSIS_START,
     CONF_BATTERY_ENTITY,
     CONF_CELL_MAH,
@@ -972,18 +975,70 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         full_charge_at: datetime | None = None
         full_charge_eta_h: float | None = None
-        for seq in (soc_projection_weather, soc_projection_clear):
-            for p in seq:
+        runtime_at: datetime | None = None
+        runtime_eta_h: float | None = None
+        primary_eta_mode = "none"
+
+        trend_h = 0.0
+        if len(soc_projection_weather) >= 2:
+            p0 = soc_projection_weather[0]
+            p1 = soc_projection_weather[-1]
+            t0 = _ensure_utc(dt_util.parse_datetime(str(p0.get("x", ""))))
+            t1 = _ensure_utc(dt_util.parse_datetime(str(p1.get("x", ""))))
+            y0 = float(p0.get("y", 0.0))
+            y1 = float(p1.get("y", 0.0))
+            if t0 is not None and t1 is not None:
+                span_h = max(0.0, (t1 - t0).total_seconds() / 3600.0)
+                if span_h > 0.0:
+                    trend_h = (y1 - y0) / span_h
+
+        trend_eps = 0.01
+        if trend_h > trend_eps:
+            primary_eta_mode = "charge"
+            for seq in (soc_projection_weather, soc_projection_clear):
+                for p in seq:
+                    y = float(p.get("y", 0.0))
+                    if y >= 99.9:
+                        t = dt_util.parse_datetime(str(p.get("x", "")))
+                        t = _ensure_utc(t)
+                        if t is not None:
+                            full_charge_at = t
+                            full_charge_eta_h = max(0.0, (t - now_utc).total_seconds() / 3600.0)
+                        break
+                if full_charge_at is not None:
+                    break
+
+            if full_charge_at is None and len(soc_projection_weather) >= 2:
+                p0 = soc_projection_weather[0]
+                y0 = float(p0.get("y", 0.0))
+                if y0 < 99.9 and trend_h > 0.0:
+                    eta = (100.0 - y0) / trend_h
+                    if eta >= 0.0 and math.isfinite(eta):
+                        full_charge_eta_h = eta
+                        full_charge_at = now_utc + timedelta(hours=eta)
+
+        elif trend_h < -trend_eps:
+            primary_eta_mode = "runtime"
+            for p in soc_projection_weather:
                 y = float(p.get("y", 0.0))
-                if y >= 99.9:
+                if y <= 0.1:
                     t = dt_util.parse_datetime(str(p.get("x", "")))
                     t = _ensure_utc(t)
                     if t is not None:
-                        full_charge_at = t
-                        full_charge_eta_h = max(0.0, (t - now_utc).total_seconds() / 3600.0)
+                        runtime_at = t
+                        runtime_eta_h = max(0.0, (t - now_utc).total_seconds() / 3600.0)
                     break
-            if full_charge_at is not None:
-                break
+            if runtime_at is None and len(soc_projection_weather) >= 2:
+                p0 = soc_projection_weather[0]
+                y0 = max(0.0, float(p0.get("y", 0.0)))
+                if y0 <= 0.1:
+                    runtime_eta_h = 0.0
+                    runtime_at = now_utc
+                elif trend_h < 0.0:
+                    eta = y0 / (-trend_h)
+                    if eta >= 0.0 and math.isfinite(eta):
+                        runtime_eta_h = eta
+                        runtime_at = now_utc + timedelta(hours=eta)
 
         charged_wh_total = cap_wh_current * sum(max(0.0, float(it.get("dsoc", 0.0))) / 100.0 for it in intervals)
         discharged_wh_total = cap_wh_current * sum(max(0.0, -float(it.get("dsoc", 0.0))) / 100.0 for it in intervals)
@@ -1085,6 +1140,8 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "backtest_walk_rmse_soc": (round(float(backtest_walk["rmse_soc"]), 3) if backtest_walk and backtest_walk.get("rmse_soc") is not None else None),
                 "backtest_walk_horizon_error_soc": (round(float(backtest_walk["horizon_error_soc"]), 3) if backtest_walk and backtest_walk.get("horizon_error_soc") is not None else None),
                 "backtest_walk_anchors_used": (int(backtest_walk["anchors_used"]) if backtest_walk and backtest_walk.get("anchors_used") is not None else None),
+                "primary_eta_mode": primary_eta_mode,
+                "forecast_trend_soc_per_h": (round(trend_h, 5) if math.isfinite(trend_h) else None),
             },
             ATTR_HISTORY_SOC: [{"t": s.ts.isoformat(), "v": s.value} for s in batt_rows_payload],
             ATTR_HISTORY_VOLTAGE: [{"t": s.ts.isoformat(), "v": s.value} for s in volt_rows_payload],
@@ -1107,8 +1164,11 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ATTR_DISCHARGE_POWER_NOW_W: round(discharge_power_now_w, 3),
             ATTR_ENERGY_CHARGED_KWH_TOTAL: round(charged_wh_total / 1000.0, 5),
             ATTR_ENERGY_DISCHARGED_KWH_TOTAL: round(discharged_wh_total / 1000.0, 5),
-            ATTR_FULL_CHARGE_ETA_HOURS: (round(full_charge_eta_h, 3) if full_charge_eta_h is not None else None),
-            ATTR_FULL_CHARGE_AT: (full_charge_at.isoformat() if full_charge_at is not None else None),
+            ATTR_FULL_CHARGE_ETA_HOURS: (round(full_charge_eta_h, 3) if (primary_eta_mode == "charge" and full_charge_eta_h is not None) else None),
+            ATTR_FULL_CHARGE_AT: (full_charge_at.isoformat() if (primary_eta_mode == "charge" and full_charge_at is not None) else None),
+            ATTR_RUNTIME_ETA_HOURS: (round(runtime_eta_h, 3) if (primary_eta_mode == "runtime" and runtime_eta_h is not None) else None),
+            ATTR_RUNTIME_AT: (runtime_at.isoformat() if (primary_eta_mode == "runtime" and runtime_at is not None) else None),
+            ATTR_PRIMARY_ETA_MODE: primary_eta_mode,
             "native_value": round(latest_soc, 2),
         }
 
