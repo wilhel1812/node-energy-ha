@@ -156,10 +156,12 @@ def _fit_load_and_solar(
 
     night_obs = [p for p, sx in zip(y, x, strict=False) if sx <= 0.01]
     night_w = [w for w, sx in zip(ws, x, strict=False) if sx <= 0.01]
+    discharge_obs = [-p for p in y if p < 0.0]
+    load_floor = _clamp(_quantile(discharge_obs, 0.2), 0.005, 2.0) if discharge_obs else 0.005
     if night_obs:
-        load_w = max(0.0, -_weighted_mean(night_obs, night_w))
+        load_w = max(load_floor, -_weighted_mean(night_obs, night_w))
     else:
-        load_w = max(0.0, -_weighted_mean(y, ws))
+        load_w = max(load_floor, -_weighted_mean(y, ws))
 
     day_xy = [(sx, p + load_w, w) for p, sx, w in zip(y, x, ws, strict=False) if sx > 0.01]
     if day_xy:
@@ -960,13 +962,17 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         full_charge_at: datetime | None = None
         full_charge_eta_h: float | None = None
-        for p in soc_projection_weather:
-            y = float(p.get("y", 0.0))
-            if y >= 99.9:
-                t = dt_util.parse_datetime(str(p.get("x", "")))
-                if t is not None:
-                    full_charge_at = t
-                    full_charge_eta_h = max(0.0, (t - now_utc).total_seconds() / 3600.0)
+        for seq in (soc_projection_weather, soc_projection_clear):
+            for p in seq:
+                y = float(p.get("y", 0.0))
+                if y >= 99.9:
+                    t = dt_util.parse_datetime(str(p.get("x", "")))
+                    t = _ensure_utc(t)
+                    if t is not None:
+                        full_charge_at = t
+                        full_charge_eta_h = max(0.0, (t - now_utc).total_seconds() / 3600.0)
+                    break
+            if full_charge_at is not None:
                 break
 
         charged_wh_total = cap_wh_current * sum(max(0.0, float(it.get("dsoc", 0.0))) / 100.0 for it in intervals)
@@ -991,19 +997,13 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         net_power_now_w = -load_w + current_prod_weather_w
         charge_power_now_w = max(0.0, net_power_now_w)
         discharge_power_now_w = max(0.0, -net_power_now_w)
+        # Build smooth historic sun elevation on a fixed time grid.
         sun_history: list[dict[str, Any]] = []
-        for it in intervals_payload:
-            tm = dt_util.parse_datetime(it["tm"])
-            if tm and tm < now_utc:
-                sun_history.append({"x": it["tm"], "y": it["sun_elev_deg"]})
-
-        last_sun_hist_ts = dt_util.parse_datetime(sun_history[-1]["x"]) if sun_history else None
-        if last_sun_hist_ts is None or last_sun_hist_ts < now_utc:
-            t_hist = (latest_ts if latest_ts > start_utc else start_utc)
-            while t_hist < now_utc:
-                elev, _ = _solar_position_utc(t_hist, lat, lon)
-                sun_history.append({"x": t_hist.isoformat(), "y": elev})
-                t_hist += step_delta
+        t_hist = payload_start_utc
+        while t_hist < now_utc:
+            elev, _ = _solar_position_utc(t_hist, lat, lon)
+            sun_history.append({"x": t_hist.isoformat(), "y": elev})
+            t_hist += step_delta
         sun_forecast = [{"x": t, "y": e} for t, e in zip(times, solar_elev, strict=False)]
         power_observed = [{"x": it["tm"], "y": it["net_power_obs_w"]} for it in intervals_payload]
         power_modeled = [{"x": it["tm"], "y": it["net_power_model_w"]} for it in intervals_payload]
