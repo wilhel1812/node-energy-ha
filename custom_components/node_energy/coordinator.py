@@ -123,6 +123,12 @@ def _clip_dict_rows_after(rows: list[dict[str, Any]], key: str, cutoff: datetime
     return out
 
 
+def _valid_soc_interval(dt_h: float) -> bool:
+    # SOC is quantized (integer %) for many nodes; very short intervals produce
+    # unrealistic power estimates when converted from dsoc/dt.
+    return 0.05 <= dt_h <= 24.0
+
+
 def _fit_load_and_solar(
     intervals: list[dict[str, Any]],
     cap_wh: float,
@@ -139,7 +145,7 @@ def _fit_load_and_solar(
     for it in intervals:
         dt_h = float(it.get("dt_h", 0.0))
         dsoc = float(it.get("dsoc", 0.0))
-        if dt_h <= 0:
+        if dt_h <= 0 or not _valid_soc_interval(dt_h):
             continue
         sx = float(it.get("sun_proxy", 0.0)) * float(it.get("weather_factor_hist", 1.0))
         p_obs = cap_wh * (dsoc / 100.0) / dt_h
@@ -205,7 +211,7 @@ def _build_empirical_weather_quantiles_by_hour(
             continue
         dt_h = float(it.get("dt_h", 0.0))
         dsoc = float(it.get("dsoc", 0.0))
-        if dt_h <= 0:
+        if dt_h <= 0 or not _valid_soc_interval(dt_h):
             continue
         p_obs = float(it.get("net_power_obs_w", 0.0))
         if not math.isfinite(p_obs):
@@ -322,7 +328,7 @@ def _compute_backtest_24h(intervals: list[dict[str, Any]], cap_wh: float) -> dic
 
     for it in test:
         dt_h = float(it.get("dt_h", 0.0))
-        if dt_h <= 0:
+        if dt_h <= 0 or not _valid_soc_interval(dt_h):
             continue
         sx = float(it.get("sun_proxy", 0.0)) * float(it.get("weather_factor_hist", 1.0))
         p_net_pred = -load_train + solar_train * sx
@@ -412,7 +418,7 @@ def _compute_walkforward_backtest(intervals: list[dict[str, Any]], cap_wh: float
         day_count = 0
         for it in test:
             dt_h = float(it.get("dt_h", 0.0))
-            if dt_h <= 0:
+            if dt_h <= 0 or not _valid_soc_interval(dt_h):
                 continue
             sx = float(it.get("sun_proxy", 0.0)) * float(it.get("weather_factor_hist", 1.0))
             p_net_pred = -load_train + solar_train * sx
