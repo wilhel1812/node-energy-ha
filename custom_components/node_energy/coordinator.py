@@ -129,6 +129,15 @@ def _valid_soc_interval(dt_h: float) -> bool:
     return 0.05 <= dt_h <= 24.0
 
 
+def _is_saturated_day_interval(it: dict[str, Any]) -> bool:
+    # Near-full SOC is censored: daylight production can cover load without
+    # producing a positive SOC delta because the battery cannot rise past 100%.
+    soc0 = float(it.get("soc0", 0.0))
+    soc1 = float(it.get("soc1", 0.0))
+    dsoc = float(it.get("dsoc", 0.0))
+    return max(soc0, soc1) >= 95.0 and dsoc <= 0.0
+
+
 def _fit_load_and_solar(
     intervals: list[dict[str, Any]],
     cap_wh: float,
@@ -142,6 +151,7 @@ def _fit_load_and_solar(
     x: list[float] = []
     y: list[float] = []
     ws: list[float] = []
+    saturated: list[bool] = []
     for it in intervals:
         dt_h = float(it.get("dt_h", 0.0))
         dsoc = float(it.get("dsoc", 0.0))
@@ -159,6 +169,7 @@ def _fit_load_and_solar(
         x.append(sx)
         y.append(p_obs)
         ws.append(decay)
+        saturated.append(_is_saturated_day_interval(it))
 
     if not y:
         return 0.0, 0.0
@@ -172,7 +183,11 @@ def _fit_load_and_solar(
     else:
         load_w = max(load_floor, -_weighted_mean(y, ws))
 
-    day_xy = [(sx, p + load_w, w) for p, sx, w in zip(y, x, ws, strict=False) if sx > 0.01]
+    day_xy = [
+        (sx, p + load_w, w)
+        for p, sx, w, sat in zip(y, x, ws, saturated, strict=False)
+        if sx > 0.01 and not sat
+    ]
     if day_xy:
         num = sum(w * sx * yp for sx, yp, w in day_xy)
         den = sum(w * sx * sx for sx, _, w in day_xy)
@@ -212,6 +227,8 @@ def _build_empirical_weather_quantiles_by_hour(
         dt_h = float(it.get("dt_h", 0.0))
         dsoc = float(it.get("dsoc", 0.0))
         if dt_h <= 0 or not _valid_soc_interval(dt_h):
+            continue
+        if _is_saturated_day_interval(it):
             continue
         p_obs = float(it.get("net_power_obs_w", 0.0))
         if not math.isfinite(p_obs):
@@ -338,6 +355,8 @@ def _compute_backtest_24h(intervals: list[dict[str, Any]], cap_wh: float) -> dic
         errs.append(soc - actual)
 
         if float(it.get("sun_proxy", 0.0)) > 0.01:
+            if _is_saturated_day_interval(it):
+                continue
             dsoc = float(it.get("dsoc", 0.0))
             p_obs = cap_wh * (dsoc / 100.0) / dt_h
             obs_prod = max(0.0, p_obs + load_train)
@@ -428,6 +447,8 @@ def _compute_walkforward_backtest(intervals: list[dict[str, Any]], cap_wh: float
             errs.append(soc - actual)
 
             if float(it.get("sun_proxy", 0.0)) > 0.01:
+                if _is_saturated_day_interval(it):
+                    continue
                 dsoc = float(it.get("dsoc", 0.0))
                 p_obs = cap_wh * (dsoc / 100.0) / dt_h
                 obs_prod = max(0.0, p_obs + load_train)
@@ -456,6 +477,73 @@ def _compute_walkforward_backtest(intervals: list[dict[str, Any]], cap_wh: float
         "rmse_soc": _quantile(rmse_list, 0.5) if rmse_list else None,
         "horizon_error_soc": _quantile(horiz_list, 0.5) if horiz_list else None,
         "solar_scale_raw": scale_med,
+    }
+
+
+def _compute_recent_balance_scale(
+    intervals: list[dict[str, Any]],
+    load_w: float,
+    solar_peak_w_raw: float,
+    *,
+    lookback_days: float = 5.0,
+) -> dict[str, float] | None:
+    if not intervals or load_w <= 0 or solar_peak_w_raw <= 0:
+        return None
+
+    enriched: list[dict[str, Any]] = []
+    for it in intervals:
+        tm = _ensure_utc(dt_util.parse_datetime(str(it.get("tm", ""))))
+        if tm is None:
+            continue
+        e = dict(it)
+        e["_tm"] = tm
+        enriched.append(e)
+    if not enriched:
+        return None
+    enriched.sort(key=lambda it: it["_tm"])
+    cutoff = enriched[-1]["_tm"] - timedelta(days=lookback_days)
+
+    duration_h = 0.0
+    daylight_h = 0.0
+    observed_net_wh = 0.0
+    load_wh = 0.0
+    raw_prod_wh = 0.0
+    soc_samples: list[float] = []
+
+    for it in enriched:
+        if it["_tm"] < cutoff:
+            continue
+        dt_h = float(it.get("dt_h", 0.0))
+        if dt_h <= 0 or not _valid_soc_interval(dt_h):
+            continue
+        p_obs = float(it.get("net_power_obs_w", 0.0))
+        if not math.isfinite(p_obs):
+            continue
+        sproxy = float(it.get("sun_proxy", 0.0))
+        wf = float(it.get("weather_factor_hist", 1.0))
+        sx = sproxy * wf
+        duration_h += dt_h
+        observed_net_wh += p_obs * dt_h
+        load_wh += load_w * dt_h
+        raw_prod_wh += solar_peak_w_raw * sx * dt_h
+        soc_samples.append(float(it.get("soc1", it.get("soc0", 0.0))))
+        if sproxy > 0.01:
+            daylight_h += dt_h
+
+    if duration_h < 24.0 or daylight_h < 4.0 or raw_prod_wh <= 1e-6 or not soc_samples:
+        return None
+
+    mean_soc = _mean(soc_samples)
+    target_prod_wh = max(0.0, load_wh + observed_net_wh)
+    scale_raw = target_prod_wh / raw_prod_wh if raw_prod_wh > 1e-6 else 1.0
+    confidence = _clamp(min(duration_h / 72.0, daylight_h / 18.0), 0.0, 1.0)
+    return {
+        "scale_raw": scale_raw,
+        "confidence": confidence,
+        "mean_soc": mean_soc,
+        "duration_h": duration_h,
+        "daylight_h": daylight_h,
+        "observed_net_w": observed_net_wh / duration_h,
     }
 
 
@@ -817,18 +905,27 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         load_w, solar_peak_w_raw = _fit_load_and_solar(intervals, cap_wh_current, reference_ts=now_utc)
         backtest_24h = _compute_backtest_24h(intervals, cap_wh_current)
         backtest_walk = _compute_walkforward_backtest(intervals, cap_wh_current)
+        recent_balance = _compute_recent_balance_scale(intervals, load_w, solar_peak_w_raw)
         solar_scale_24h_raw = 1.0
         if backtest_walk and backtest_walk.get("solar_scale_raw") is not None:
-            solar_scale_24h_raw = _clamp(float(backtest_walk.get("solar_scale_raw", 1.0)), 0.5, 1.5)
+            solar_scale_24h_raw = _clamp(float(backtest_walk.get("solar_scale_raw", 1.0)), 0.5, 2.0)
         elif backtest_24h and int(backtest_24h.get("daylight_samples_test", 0)) >= 3:
-            solar_scale_24h_raw = _clamp(float(backtest_24h.get("solar_scale_raw", 1.0)), 0.5, 1.5)
+            solar_scale_24h_raw = _clamp(float(backtest_24h.get("solar_scale_raw", 1.0)), 0.5, 2.0)
         bt_conf = 0.0
         if backtest_walk and backtest_walk.get("anchors_used") is not None:
             bt_conf = _clamp(float(backtest_walk.get("anchors_used", 0)) / 6.0, 0.0, 1.0)
         elif backtest_24h:
             bt_conf = _clamp(int(backtest_24h.get("daylight_samples_test", 0)) / 12.0, 0.0, 1.0)
+
+        recent_balance_scale_raw = None
+        recent_balance_conf = 0.0
+        if recent_balance and float(recent_balance.get("mean_soc", 0.0)) >= 85.0:
+            recent_balance_scale_raw = _clamp(float(recent_balance.get("scale_raw", 1.0)), 0.5, 4.0)
+            recent_balance_conf = float(recent_balance.get("confidence", 0.0))
+            solar_scale_24h_raw = max(solar_scale_24h_raw, recent_balance_scale_raw)
+            bt_conf = max(bt_conf, recent_balance_conf)
         solar_scale_24h = 1.0 + (solar_scale_24h_raw - 1.0) * bt_conf
-        solar_scale_24h = _clamp(solar_scale_24h, 0.5, 1.5)
+        solar_scale_24h = _clamp(solar_scale_24h, 0.5, 4.0)
         solar_peak_w = solar_peak_w_raw * solar_scale_24h
 
         empirical = _build_empirical_weather_quantiles_by_hour(
@@ -1135,6 +1232,18 @@ class NodeEnergyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "solar_scale_24h": solar_scale_24h,
                 "solar_scale_24h_raw": solar_scale_24h_raw,
                 "calibration_confidence": bt_conf,
+                "recent_balance_scale_raw": (round(recent_balance_scale_raw, 3) if recent_balance_scale_raw is not None else None),
+                "recent_balance_confidence": round(recent_balance_conf, 3),
+                "recent_balance_observed_net_w": (
+                    round(float(recent_balance["observed_net_w"]), 5)
+                    if recent_balance and recent_balance.get("observed_net_w") is not None
+                    else None
+                ),
+                "recent_balance_mean_soc": (
+                    round(float(recent_balance["mean_soc"]), 2)
+                    if recent_balance and recent_balance.get("mean_soc") is not None
+                    else None
+                ),
                 "weather_fallback_method": "empirical_quantile_blend",
                 "weather_fallback_quantile_p20": 0.2,
                 "weather_fallback_quantile_p50": 0.5,
